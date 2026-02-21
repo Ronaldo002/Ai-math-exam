@@ -1,25 +1,25 @@
 import streamlit as st
 import google.generativeai as genai
+import os
 
-st.title("🆘 최종 긴급 진단")
+st.title("🚀 수능 모의고사 최종 연결 테스트")
 
-# 1. 키 읽기
+# 환경변수를 통해 베타 버전 이슈를 원천 차단
+os.environ["GOOGLE_API_USE_MTLS"] = "never"
+
 if "GEMINI_API_KEY" not in st.secrets:
-    st.error("Secrets에 키가 없습니다!")
+    st.error("Secrets 설정이 비어있습니다!")
 else:
     api_key = st.secrets["GEMINI_API_KEY"]
     genai.configure(api_key=api_key)
     
-    # 2. 가장 낮은 사양의 모델로 딱 한 마디만 시도
-    if st.button("🔌 서버 강제 연결 시도"):
+    if st.button("🔌 구글 서버에 접속 시도"):
         try:
-            # 모든 복잡한 설정을 빼고 가장 기본형으로 호출
-            model = genai.GenerativeModel('gemini-1.5-flash')
-            response = model.generate_content("hello")
-            st.success("🎉 대박! 드디어 연결됐습니다!")
-            st.write("AI 대답:", response.text)
+            # v1beta 에러를 피하기 위해 모델 경로를 수동으로 지정
+            model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
+            response = model.generate_content("성공했다면 '축하합니다'라고 말해줘.")
+            st.success(f"🎊 연결 성공! AI 대답: {response.text}")
+            st.balloons()
         except Exception as e:
-            st.error(f"❌ 구글 서버가 응답을 거부함: {e}")
-            st.info("이 에러가 뜨면 키를 새로 뽑거나 1시간 뒤에 다시 해야 합니다.")
-
-
+            st.error(f"❌ 여전히 서버 거부 중: {e}")
+            st.info("이 에러가 계속된다면, 구글 계정을 바꿔서 새 키를 발급받는 것이 유일한 해결책입니다.")
