@@ -1,11 +1,11 @@
 import streamlit as st
 import google.generativeai as genai
-import asyncio
 import itertools
+import time
 
 st.set_page_config(page_title="2026 수능 수학 킬러 마스터", page_icon="🔥", layout="wide")
 
-# 1. 디자인 템플릿 (KeyError 방지를 위해 {questions}, {solutions}로 이름 통일)
+# 1. 디자인 템플릿 (수식 깨짐 방지 및 모바일 대응)
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ko">
@@ -48,7 +48,6 @@ HTML_TEMPLATE = """
         .q-num {{ font-weight: bold; font-size: 14pt; position: absolute; left: 0; top: 0; }}
         .solution-page {{ page-break-before: always; border-top: 3px double black; margin-top: 60px; padding-top: 40px; }}
         .sol-card {{ border: 1.5px solid #000; padding: 15px; margin-bottom: 25px; background: #fafafa; }}
-        
         @media (max-width: 768px) {{
             body {{ padding: 0; }}
             .paper {{ padding: 10px; width: 100%; box-shadow: none; }}
@@ -76,57 +75,61 @@ HTML_TEMPLATE = """
 if "API_KEYS" in st.secrets:
     key_cycle = itertools.cycle(st.secrets["API_KEYS"])
 else:
-    st.error("API_KEYS를 설정해주세요.")
+    st.error("Secrets에서 API_KEYS를 설정해주세요.")
     st.stop()
 
-async def fetch_chunk(start, end, subject, diff):
-    current_key = next(key_cycle)
-    genai.configure(api_key=current_key)
-    model = genai.GenerativeModel('models/gemini-2.5-flash')
+# 3. 안정적인 순차 생성 엔진 (Event Loop 오류 해결)
+def generate_stable_exam(subject, total, diff):
+    all_qs = ""
+    all_sols = ""
+    progress_bar = st.progress(0)
     
-    prompt = f"""
-    인사말 없이 HTML만 출력. 수능 수학 {subject} {start}~{end}번 문항({end-start+1}개) 제작. 난이도: {diff}.
-    수식은 반드시 $ 기호를 사용하되, 백슬래시(\)가 두 번씩 들어가게 작성해 (예: \\\\frac).
-    문제는 <div class='question'>, 해설은 [해설시작] 뒤 <div class='sol-card'> 구조로 작성해.
-    """
+    # 킬러는 2문항씩, 나머지는 5문항씩 묶어 처리
+    chunk_size = 2 if diff == "킬러" else 5
     
-    try:
-        await asyncio.sleep(0.5)
-        response = await model.generate_content_async(prompt)
-        text = response.text.replace('```html', '').replace('```', '').strip()
-        text = text.replace('\\\\', '\\').replace('\\W', '\\') # 수식 깨짐 방지
+    for i in range(1, total + 1, chunk_size):
+        start, end = i, min(i + chunk_size - 1, total)
+        current_key = next(key_cycle)
+        genai.configure(api_key=current_key)
+        model = genai.GenerativeModel('models/gemini-2.5-flash')
         
-        if "[해설시작]" in text:
-            q, s = text.split("[해설시작]", 1)
-            return q.strip(), s.strip()
-        return text, ""
-    except:
-        return "", ""
+        prompt = f"""인사말 없이 HTML만 출력. 수능 수학 {subject} {start}~{end}번 문항 제작. 난이도: {diff}. 
+        수식은 $ 사용하되 백슬래시(\) 두 번씩 입력. 문제는 <div class='question'>, 해설은 [해설시작] 뒤 <div class='sol-card'> 구조."""
+        
+        try:
+            response = model.generate_content(prompt)
+            text = response.text.replace('```html', '').replace('```', '').strip()
+            text = text.replace('\\\\', '\\').replace('\\W', '\\') #
+            
+            if "[해설시작]" in text:
+                q, s = text.split("[해설시작]", 1)
+                all_qs += q.strip()
+                all_sols += s.strip()
+            else:
+                all_qs += text
+            
+            progress_bar.progress(end / total)
+            time.sleep(1) # 키 로테이션 후 안정화 시간
+        except Exception as e:
+            st.error(f"⚠️ {start}번 구간 생성 중 오류 발생: {e}")
+            continue
+            
+    return all_qs, all_sols
 
-# 3. 메인 로직
+# 4. 앱 UI
 st.sidebar.title("🔥 최종 킬러 마스터")
 sub_opt = st.sidebar.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
 num_opt = st.sidebar.radio("문항 수", [5, 10, 30], index=1)
 diff_opt = st.sidebar.select_slider("난이도", options=["기초", "표준", "킬러"], value="킬러")
 
 if st.sidebar.button("🚀 초고속 발간"):
-    with st.status("⏳ 병렬 엔진 가동 및 수식 최적화 중...") as status:
-        chunk_size = 2 if diff_opt == "킬러" else 5
-        tasks = [fetch_chunk(i, min(i+chunk_size-1, num_opt), sub_opt, diff_opt) for i in range(1, num_opt + 1, chunk_size)]
+    with st.status("⏳ 시스템 안정화 및 문항 생성 중...") as status:
+        qs, sols = generate_stable_exam(sub_opt, num_opt, diff_opt)
         
-        try:
-            results = asyncio.run(asyncio.gather(*tasks))
-            qs = "".join([r[0] for r in results])
-            sols = "".join([r[1] for r in results])
-            
-            if qs:
-                # [수정 완료] 템플릿의 변수명 {questions}, {solutions}와 일치시켰습니다.
-                final_html = HTML_TEMPLATE.format(subject=sub_opt, questions=qs, solutions=sols)
-                st.components.v1.html(final_html, height=1200, scrolling=True)
-                st.success("✅ 발간 성공!")
-            else:
-                st.error("생성된 내용이 없습니다.")
-        except Exception as e:
-            st.error(f"오류 발생: {e}")
+        if qs:
+            # 템플릿 변수명 {questions}, {solutions} 완벽 매칭
+            final_html = HTML_TEMPLATE.format(subject=sub_opt, questions=qs, solutions=sols)
+            st.components.v1.html(final_html, height=1200, scrolling=True)
+            st.success("✅ 모든 에러를 뚫고 발간 성공!")
         status.update(label="발간 완료", state="complete")
 
