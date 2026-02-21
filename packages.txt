@@ -1,0 +1,3 @@
+texlive-xetex
+texlive-lang-korean
+texlive-fonts-recommended
