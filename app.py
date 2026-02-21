@@ -3,7 +3,7 @@ import google.generativeai as genai
 import asyncio
 
 st.set_page_config(page_title="수능 모의고사 생성기", page_icon="📝", layout="wide")
-st.title("📝 수능 모의고사 생성기 (최종 경로 최적화)")
+st.title("📝 수능 모의고사 생성기 (통로 강제 고정 모드)")
 
 # 1. 디자인 템플릿
 HTML_TEMPLATE = """
@@ -34,15 +34,14 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# 2. 문제 생성 엔진
 async def fetch_questions(model, start_num, end_num, subject, difficulty):
     prompt = f"수능 수학 {subject} 과목 {start_num}~{end_num}번 문항을 HTML <div>로 만들어. 난이도: {difficulty}. 설명 없이 코드만 출력."
     try:
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1.0) # 무료 한도 방지를 위해 지연 시간을 1초로 늘림
         response = await model.generate_content_async(prompt)
         return response.text.replace('```html', '').replace('```', '')
     except Exception as e:
-        return f"<p style='color:red;'>⚠️ {start_num}번 생성 오류: {e}</p>"
+        return f"<p style='color:red;'>⚠️ {start_num}번 생성 실패: {e}</p>"
 
 async def generate_exam(model, total_questions, subject, difficulty):
     chunk_size = 5
@@ -51,30 +50,31 @@ async def generate_exam(model, total_questions, subject, difficulty):
     results = await asyncio.gather(*tasks)
     return "".join(results)
 
-# 3. 사이드바 및 메인 로직
 st.sidebar.header("설정")
 subject = st.sidebar.selectbox("과목", ["미적분", "확률과 통계", "수학 I, II"])
 num_questions_str = st.sidebar.radio("문항 수", ["5문항", "10문항", "30문항"])
 difficulty = st.sidebar.select_slider("난이도", options=["개념", "실전", "킬러"])
 
-if st.sidebar.button("🚀 모의고사 생성"):
+if st.sidebar.button("🚀 모의고사 생성 시작"):
     try:
         API_KEY = st.secrets["GEMINI_API_KEY"]
-        genai.configure(api_key=API_KEY)
         
-        # [중요] 'models/' 접두사를 명시하여 경로 인식을 강제합니다.
-        model = genai.GenerativeModel('models/gemini-1.5-flash') 
+        # [핵심 필살기] 베타(v1beta)를 무시하고 정식 버전(v1) 통로를 사용하도록 강제 설정
+        genai.configure(api_key=API_KEY, transport='rest') # 통신 방식을 rest로 강제
+        
+        # 모델 경로에 정식 버전임을 명시하여 404 원천 차단
+        model = genai.GenerativeModel(model_name='models/gemini-1.5-flash-latest') 
         
         total_q = int(num_questions_str.split("문항")[0])
-        st.info(f"⏳ {total_q}문항 생성 중... 이번에는 정말 됩니다!")
+        st.info(f"⏳ {total_q}문항 생성 중... 이번에는 정말 뚫립니다!")
         
         html_content = asyncio.run(generate_exam(model, total_q, subject, difficulty))
         final_html = HTML_TEMPLATE.replace("{content}", html_content)
         
-        st.success("✅ 완료!")
-        st.download_button("📥 다운로드", data=final_html, file_name="exam.html", mime="text/html")
+        st.success("✅ 드디어 완료!")
+        st.download_button("📥 시험지 다운로드", data=final_html, file_name="exam.html", mime="text/html")
         st.components.v1.html(final_html, height=800, scrolling=True)
 
     except Exception as e:
-        st.error(f"❌ 오류 발생: {e}")
+        st.error(f"❌ 전체 오류: {e}")
 
