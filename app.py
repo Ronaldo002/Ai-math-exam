@@ -1,25 +1,31 @@
 import streamlit as st
 import google.generativeai as genai
-import os
 
-st.title("🚀 수능 모의고사 최종 연결 테스트")
+st.set_page_config(page_title="최종 연결 테스트", page_icon="🎈")
+st.title("🎈 신규 API 연결 최종 테스트")
 
-# 환경변수를 통해 베타 버전 이슈를 원천 차단
-os.environ["GOOGLE_API_USE_MTLS"] = "never"
-
-if "GEMINI_API_KEY" not in st.secrets:
-    st.error("Secrets 설정이 비어있습니다!")
-else:
-    api_key = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=api_key)
+# 1. Secrets에서 키 읽기
+try:
+    API_KEY = st.secrets["GEMINI_API_KEY"]
+    genai.configure(api_key=API_KEY)
     
-    if st.button("🔌 구글 서버에 접속 시도"):
+    st.info("⏳ 새 키로 구글 서버에 접속을 시도합니다...")
+
+    if st.button("🚀 연결 확인하기"):
+        # 가장 안정적인 기본 모델로 테스트
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
         try:
-            # v1beta 에러를 피하기 위해 모델 경로를 수동으로 지정
-            model = genai.GenerativeModel(model_name='models/gemini-1.5-flash')
-            response = model.generate_content("성공했다면 '축하합니다'라고 말해줘.")
-            st.success(f"🎊 연결 성공! AI 대답: {response.text}")
-            st.balloons()
+            response = model.generate_content("성공했다면 '준비 완료'라고 한 마디만 해줘.")
+            st.success(f"🎊 드디어 성공했습니다! AI 대답: {response.text}")
+            st.balloons() # 화면에 풍선이 날아갑니다!
+            
+            st.markdown("---")
+            st.write("✅ 이제 이 키로 모의고사 생성기를 돌릴 수 있습니다. 전체 코드를 합쳐드릴까요?")
+            
         except Exception as e:
-            st.error(f"❌ 여전히 서버 거부 중: {e}")
-            st.info("이 에러가 계속된다면, 구글 계정을 바꿔서 새 키를 발급받는 것이 유일한 해결책입니다.")
+            st.error(f"❌ 접속 실패: {e}")
+            st.info("팁: 새 프로젝트 키는 활성화까지 1~2분 정도 걸릴 수 있습니다. 잠시 후 다시 눌러보세요.")
+
+except Exception as e:
+    st.error(f"⚠️ Secrets 설정 오류: {e}")
