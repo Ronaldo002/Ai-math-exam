@@ -1,9 +1,10 @@
 import streamlit as st
 import google.generativeai as genai
+import asyncio
 
-st.set_page_config(page_title="AI 모의고사 생성기", page_icon="⚡", layout="wide")
-st.title("⚡ AI 수능 모의고사 생성기 (초고속 30초 완성)")
-st.markdown("클라우드 서버의 한계를 돌파했습니다! 10초 만에 다운로드 후 브라우저에서 바로 인쇄(PDF 저장)하세요.")
+st.set_page_config(page_title="AI 모의고사 생성기", page_icon="🏎️", layout="wide")
+st.title("🏎️ AI 수능 모의고사 생성기 (극한 병렬 모드)")
+st.markdown("무료 API 한도(15명)를 꽉 채워 15명의 AI가 동시에 2문제씩 출제합니다!")
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -21,7 +22,7 @@ HTML_TEMPLATE = """
         .header h1 { margin: 0; font-size: 24px; font-weight: bold; }
         .header h2 { margin: 5px 0 0 0; font-size: 18px; font-weight: bold; }
         .twocolumn { column-count: 2; column-gap: 30px; column-rule: 1px solid #ccc; }
-        .question { margin-bottom: 40px; page-break-inside: avoid; }
+        .question { margin-bottom: 60px; page-break-inside: avoid; }
         .q-number { font-weight: bold; font-size: 1.1em; margin-right: 5px; }
         .options { display: flex; justify-content: space-between; margin-top: 15px; font-size: 0.9em; }
         .score { float: right; font-weight: bold; }
@@ -45,53 +46,71 @@ HTML_TEMPLATE = """
 </html>
 """
 
+async def fetch_questions(model, start_num, end_num, subject, difficulty):
+    prompt = f"""
+    너는 수능 수학 출제 위원이야. {subject} 과목의 모의고사 중 **{start_num}번부터 {end_num}번까지** 총 {end_num - start_num + 1}문제를 만들어. 난이도는 '{difficulty}'에 맞춰.
+    오직 HTML 태그로만 출력하고, 설명이나 인사말은 절대 하지 마. 수식은 MathJax (\\( \\), \\[ \\])를 써.
+    
+    [특수 조건]
+    - 인쇄 시 총 12페이지 분량이 넉넉히 나올 수 있도록 문항 사이에 <br><br><br><br>를 넣어 여백을 아주 길게 줄 것.
+    - 만약 이 번호대 안에 17번 문항이 있다면 문제 내용에 [그림 추가] 공간을 반드시 표시할 것.
+    - 만약 이 번호대 안에 26번 문항이 있다면 문제 내용에 [그래프 추가] 공간을 반드시 표시할 것.
+
+    [출력 구조 예시]
+    <div class="question">
+        <span class="q-number">{start_num}.</span> 문제 내용... <span class="score">[3점]</span>
+        <div class="options">
+            <span>① 1</span><span>② 2</span><span>③ 3</span><span>④ 4</span><span>⑤ 5</span>
+        </div>
+    </div>
+    """
+    try:
+        response = await model.generate_content_async(prompt)
+        return response.text.replace('```html', '').replace('```', '')
+    except Exception as e:
+        # 에러 발생 시 프로그램이 멈추지 않고, 해당 번호대에만 에러 메시지를 표시합니다.
+        return f"<p style='color:red; font-weight:bold;'>[⚠️ {start_num}~{end_num}번 생성 실패: API 무료 한도 초과]</p>"
+
+async def generate_exam(model, total_questions, subject, difficulty):
+    # 🔥 극단적 쥐어짜기 핵심: 2문제씩 쪼개서 최대 15명의 AI를 동원합니다!
+    chunk_size = 2 
+    tasks = []
+    
+    for i in range(1, total_questions + 1, chunk_size):
+        start = i
+        end = min(i + chunk_size - 1, total_questions)
+        tasks.append(fetch_questions(model, start, end, subject, difficulty))
+    
+    results = await asyncio.gather(*tasks)
+    return "".join(results)
+
 st.sidebar.header("출제 옵션 설정")
 subject = st.sidebar.selectbox("📚 과목 선택", ["미적분", "확률과 통계", "수학 I, II"])
-num_questions = st.sidebar.radio("🔢 문항 수", ["5문항 (테스트용)", "10문항", "20문항", "30문항"])
+num_questions_str = st.sidebar.radio("🔢 문항 수", ["5문항 (테스트용)", "10문항", "20문항", "30문항"])
 difficulty = st.sidebar.select_slider("🔥 난이도", options=["개념 확인", "수능 실전형", "최상위권 킬러형"])
 
-if st.sidebar.button("🚀 초고속 시험지 만들기"):
+if st.sidebar.button("🚀 극한의 속도로 출제 시작"):
     try:
         API_KEY = st.secrets["GEMINI_API_KEY"]
         genai.configure(api_key=API_KEY)
         model = genai.GenerativeModel('gemini-2.5-flash') 
         
-        prompt = f"""
-        너는 수능 수학 출제 위원이야. {subject} 과목의 {num_questions} 수능 모의고사를 출제해. 난이도는 '{difficulty}'에 맞춰줘.
-        반드시 아래의 HTML 태그 구조를 100% 똑같이 유지해서 작성해. 설명이나 인사말 없이 오직 HTML 코드만 출력할 것.
-        수식은 반드시 MathJax 문법(인라인 수식은 \\( ... \\), 블록 수식은 \\[ ... \\])을 사용해.
+        total_q = int(num_questions_str.split("문항")[0])
         
-        [필수 조건]
-        - 총 12페이지 분량이 되도록 문항 사이에 <br><br> 등으로 여백을 넉넉히 둘 것.
-        - 만약 17번 문항을 생성하게 된다면 문제 내용에 [그림 삽입 공간]을 텍스트로 표시할 것.
-        - 만약 26번 문항을 생성하게 된다면 문제 내용에 [그래프 삽입 공간]을 텍스트로 표시할 것.
-
-        [반드시 지켜야 할 출력 구조 예시]
-        <div class="question">
-            <span class="q-number">1.</span> 두 집합 \\( A=\\{{1, 2, 3\\}} \\), \\( B=\\{{2, 3, 4\\}} \\) 에 대하여 \\( A \\cap B \\) 의 모든 원소의 합은? <span class="score">[2점]</span>
-            <div class="options">
-                <span>① 1</span><span>② 2</span><span>③ 3</span><span>④ 4</span><span>⑤ 5</span>
-            </div>
-        </div>
-        """
+        # 몇 명의 AI가 투입되는지 계산해서 화면에 보여줍니다.
+        ai_count = (total_q + 1) // 2 
+        st.info(f"⏳ {total_q}문항 출제 중... 🔥 무려 {ai_count}명의 AI 조수가 동시에 작업을 시작했습니다! (약 5~10초 소요)")
         
-        st.info("⏳ AI가 초고속으로 문제를 출제하고 있습니다... (약 10~15초 소요)")
-        
-        response = model.generate_content(prompt)
-        
-        # AI가 붙일 수 있는 마크다운 찌꺼기 제거
-        html_content = response.text.replace('```html', '').replace('```', '')
-        
-        # 디자인 템플릿에 문제 쏙 넣기
+        html_content = asyncio.run(generate_exam(model, total_q, subject, difficulty))
         final_html = HTML_TEMPLATE.replace("{content}", html_content)
         
-        st.success("🎉 생성 완료! 아래 버튼을 눌러 다운로드하세요.")
-        st.markdown("💡 **꿀팁:** 다운받은 파일을 인터넷 브라우저로 열고, **`Ctrl + P` (인쇄)를 눌러 'PDF로 저장'**을 선택하면 완벽한 2단 분할 PDF 시험지가 됩니다!")
+        st.success(f"🎉 단숨에 생성 완료! 총 {ai_count}명의 AI가 협력했습니다.")
+        st.markdown("💡 **꿀팁:** 다운받은 파일을 브라우저로 열고, **`Ctrl + P` (인쇄) -> 'PDF로 저장'**을 누르세요.")
         
         st.download_button(
-            label="📥 초고속 시험지 다운로드 (HTML)",
+            label="📥 완성된 시험지 다운로드 (HTML)",
             data=final_html,
-            file_name=f"수능_모의고사_{subject}.html",
+            file_name=f"수능_모의고사_{subject}_극한.html",
             mime="text/html"
         )
 
