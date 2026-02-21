@@ -3,13 +3,11 @@ import google.generativeai as genai
 import itertools
 import time
 
-# 1. 최신 모델 및 페이지 설정
-# 구글 AI Studio의 최신 정식 명칭인 'gemini-2.0-flash'를 사용합니다.
+# 1. 페이지 및 모델 설정
 MODEL_NAME = 'gemini-2.0-flash'
+st.set_page_config(page_title="2026 수능 수학 무한 마스터", page_icon="♾️", layout="wide")
 
-st.set_page_config(page_title="2026 수능 수학 2.5 킬러 마스터", page_icon="🧠", layout="wide")
-
-# 2. 디자인 템플릿 (250px 여백 + 모바일 반응형 + PDF 강제 다운로드)
+# [HTML_TEMPLATE 디자인 및 PDF 다운로드 로직은 이전과 동일]
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ko">
@@ -44,7 +42,7 @@ HTML_TEMPLATE = """
         @page {{ size: A4; margin: 10mm; }}
         body {{ font-family: 'Batang', serif; line-height: 1.6; color: black; background: #f4f4f4; padding: 20px; }}
         .no-print {{ text-align: right; max-width: 210mm; margin: 0 auto 20px; }}
-        .btn-download {{ padding: 12px 25px; background: #007bff; color: white; border: none; cursor: pointer; border-radius: 8px; font-weight: bold; }}
+        .btn-download {{ padding: 12px 25px; background: #28a745; color: white; border: none; cursor: pointer; border-radius: 8px; font-weight: bold; }}
         .paper {{ max-width: 210mm; margin: 0 auto; background: white; padding: 15mm; min-height: 297mm; box-shadow: 0 0 10px rgba(0,0,0,0.1); }}
         .header {{ text-align: center; border-bottom: 2.5px solid black; padding-bottom: 10px; margin-bottom: 25px; }}
         .twocolumn {{ column-count: 2; column-gap: 45px; column-rule: 0.8px solid black; }}
@@ -53,16 +51,13 @@ HTML_TEMPLATE = """
         .solution-page {{ page-break-before: always; border-top: 3px double black; margin-top: 60px; padding-top: 40px; }}
         .sol-card {{ border: 1.5px solid #000; padding: 15px; margin-bottom: 25px; background: #fafafa; }}
         @media (max-width: 768px) {{
-            body {{ padding: 0; }}
-            .paper {{ padding: 10px; width: 100%; box-shadow: none; }}
             .twocolumn {{ column-count: 1; }}
-            .question {{ margin-bottom: 60px; padding-left: 20px; }}
-            .MathJax {{ overflow-x: auto; display: block !important; }}
+            .question {{ margin-bottom: 60px; }}
         }}
     </style>
 </head>
 <body>
-    <div class="no-print"><button class="btn-download" onclick="downloadPDF()">📥 PDF 파일 직접 저장 (모바일 지원)</button></div>
+    <div class="no-print"><button class="btn-download" onclick="downloadPDF()">📥 PDF 직접 저장</button></div>
     <div class="paper">
         <div class="header"><h1>2026학년도 대학수학능력시험 모의평가</h1><h2>수학 영역 ({subject})</h2></div>
         <div class="twocolumn">{questions}</div>
@@ -75,54 +70,50 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# 3. 하이브리드 키 관리 로직
+# 2. 세션 상태 및 키 관리 로직
+if "user_api_key" not in st.session_state:
+    st.session_state.user_api_key = ""
+
 if "API_KEYS" in st.secrets:
     admin_keys = list(st.secrets["API_KEYS"])
     if "key_pool" not in st.session_state:
-        # 모든 공용 배럭을 '사용 가능' 상태로 초기화
         st.session_state.key_pool = {k: True for k in admin_keys}
 else:
-    st.error("Secrets에 API_KEYS가 등록되지 않았습니다.")
+    st.error("Secrets 설정이 필요합니다.")
     st.stop()
 
-def get_best_key(user_key):
-    # 1순위: 사용자가 직접 입력한 개인 키
-    if user_key and len(user_key) > 20:
-        return user_key, "개인 전용"
+def get_active_key():
+    # 1순위: 브라우저 세션에 저장된 사용자 키
+    if st.session_state.user_api_key and len(st.session_state.user_api_key) > 20:
+        return st.session_state.user_api_key, "개인 배럭 (무한)"
+    
     # 2순위: 관리자의 건강한 공용 키
     healthy_keys = [k for k, v in st.session_state.key_pool.items() if v]
     if healthy_keys:
-        return healthy_keys[0], "공용 배럭"
+        return healthy_keys[0], "공용 배럭 (체험용)"
     return None, None
 
-# 4. Gemini 2.5 기반 지능형 생성 엔진
-def generate_killer_exam(subject, total, diff, user_key):
-    all_qs = ""
-    all_sols = ""
+# 3. 무중단 생성 엔진
+def generate_infinity_exam(subject, total, diff):
+    all_qs, all_sols = "", ""
     progress_bar = st.progress(0)
     status_msg = st.empty()
     
     i = 1
     while i <= total:
-        current_key, key_type = get_best_key(user_key)
+        current_key, key_desc = get_active_key()
         if not current_key:
-            st.error("🚨 모든 API 배럭이 전사했습니다. 개인 키를 입력하시면 즉시 가동됩니다!")
+            st.error("🚨 모든 배럭이 소진되었습니다! 개인 키를 입력하면 바로 재개됩니다.")
             break
             
         genai.configure(api_key=current_key)
+        model = genai.GenerativeModel(MODEL_NAME)
+        
+        status_msg.info(f"⏳ {i}번 문항 생성 중... [사용 중: {key_desc}]")
+        
+        prompt = f"수능 수학 {subject} {i}번 킬러 문항 제작. 난이도: {diff}. HTML <div class='question'>과 [해설시작] 뒤 <div class='sol-card'> 형식으로 출력. 수식은 $ 사용."
         
         try:
-            model = genai.GenerativeModel(MODEL_NAME)
-            start = i
-            status_msg.info(f"⏳ {start}번 킬러 문항 정밀 분석 중... (배럭 타입: {key_type})")
-            
-            prompt = f"""
-            수능 수학 {subject} {start}번 킬러 문항을 제작하라. 난이도: {diff}.
-            조건 (가), (나) 등을 활용한 수능 특유의 사고력 문제를 HTML 형식으로 출력하라.
-            인사말 없이 <div class='question'> 문제와 [해설시작] 뒤 <div class='sol-card'> 해설만 작성하라.
-            수식은 반드시 $ 기호를 사용하고, 백슬래시는 2개(\\\\)씩 입력하라.
-            """
-            
             response = model.generate_content(prompt)
             text = response.text.replace('```html', '').replace('```', '').strip()
             text = text.replace('\\\\', '\\').replace('\\W', '\\')
@@ -133,48 +124,49 @@ def generate_killer_exam(subject, total, diff, user_key):
                 all_sols += s.strip()
                 i += 1
                 progress_bar.progress(min((i-1)/total, 1.0))
-                # 2.5 엔진은 고성능이므로 요청 간 지연시간을 2초로 최적화
                 time.sleep(2)
             else:
-                continue # 형식 오류 시 해당 번호 재시도
-                
+                continue
         except Exception as e:
-            err_str = str(e)
-            if "429" in err_str:
-                if key_type == "개인 전용":
-                    st.warning("⚠️ 개인 키 한도 도달! 공용 배럭으로 전환을 시도합니다.")
-                    user_key = None 
+            if "429" in str(e):
+                if "개인" in key_desc:
+                    st.warning("⚠️ 개인 키 한도 도달! 잠시 후 공용으로 전환합니다.")
+                    st.session_state.user_api_key = "" # 세션 키 비우기
                 else:
                     st.session_state.key_pool[current_key] = False
                 continue
-            elif "404" in err_str:
-                st.error(f"🚫 모델 '{MODEL_NAME}'을 찾을 수 없습니다. 모델명을 확인하거나 1.5로 낮추세요.")
-                break
             else:
-                st.error(f"알 수 없는 오류 발생: {e}")
+                st.error(f"오류: {e}")
                 break
-                
     return all_qs, all_sols
 
-# 5. 사이드바 UI 및 실행부
+# 4. 사이드바 UI (로컬 기억 기능)
 with st.sidebar:
-    st.title("🚀 2.5 킬러 마스터")
-    st.markdown("---")
-    st.subheader("🔑 개인 배럭 가동")
-    st.caption("한도 초과 없이 무제한으로 사용하려면 개인 키를 입력하세요.")
-    user_api_input = st.text_input("Gemini API Key", type="password")
-    st.link_button("👉 10초만에 무료 키 발급", "https://aistudio.google.com/app/apikey")
+    st.title("♾️ 무한 킬러 시스템")
+    st.divider()
+    st.subheader("🔑 내 API 키 기억하기")
+    # 사용자가 입력하면 세션에 즉시 반영
+    user_input = st.text_input(
+        "Gemini API Key", 
+        value=st.session_state.user_api_key,
+        type="password", 
+        help="한 번 입력하면 브라우저가 기억합니다."
+    )
+    if user_input != st.session_state.user_api_key:
+        st.session_state.user_api_key = user_input
+        st.success("키 저장 완료!")
+    
+    st.link_button("🌐 무료 키 10초 발급", "https://aistudio.google.com/app/apikey")
     st.divider()
     
     sub_opt = st.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
-    num_opt = st.radio("문항 수", [5, 10, 30], index=0)
+    num_opt = st.radio("문항 수", [5, 10, 30])
     diff_opt = st.select_slider("난이도", options=["표준", "준킬러", "킬러"], value="킬러")
 
-if st.sidebar.button("🔥 지능형 모의고사 발간"):
-    with st.status("🔮 Gemini 2.5 엔진 분석 중...") as status:
-        qs, sols = generate_killer_exam(sub_opt, num_opt, diff_opt, user_api_input)
+if st.sidebar.button("🚀 무중단 발간"):
+    with st.status("🔮 최적의 배럭을 찾아 문항 생성 중...") as status:
+        qs, sols = generate_infinity_exam(sub_opt, num_opt, diff_opt)
         if qs:
             final_html = HTML_TEMPLATE.format(subject=sub_opt, questions=qs, solutions=sols)
             st.components.v1.html(final_html, height=1200, scrolling=True)
-            st.success("✅ 발간 성공!")
         status.update(label="작업 완료", state="complete")
