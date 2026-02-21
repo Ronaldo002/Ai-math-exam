@@ -1,80 +1,54 @@
 import streamlit as st
 import google.generativeai as genai
-import asyncio
+import time
 
-st.set_page_config(page_title="수능 모의고사 생성기", page_icon="📝", layout="wide")
-st.title("📝 수능 모의고사 생성기 (통로 강제 고정 모드)")
+st.set_page_config(page_title="AI 시험지 생성기 v2", page_icon="📝")
+st.title("📝 수능 모의고사 생성기 (안전 모드)")
 
-# 1. 디자인 템플릿
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-    <meta charset="UTF-8">
-    <title>수능 모의고사</title>
-    <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
-    <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
-    <style>
-        @page { size: A4; margin: 15mm; }
-        body { font-family: 'Malgun Gothic', sans-serif; line-height: 1.6; background: white; }
-        .paper { max-width: 210mm; margin: 0 auto; padding: 10mm; }
-        .header { text-align: center; border-bottom: 2px solid black; padding-bottom: 10px; margin-bottom: 20px; }
-        .twocolumn { column-count: 2; column-gap: 30px; column-rule: 1px solid #ccc; }
-        .question { margin-bottom: 40px; page-break-inside: avoid; }
-        .q-number { font-weight: bold; font-size: 1.1em; }
-        .options { display: flex; justify-content: space-between; margin-top: 10px; font-size: 0.9em; }
-    </style>
-</head>
-<body>
-    <div class="paper">
-        <div class="header"><h1>2026학년도 대학수학능력시험</h1><h2>수학 영역</h2></div>
-        <div class="twocolumn">{content}</div>
-    </div>
-</body>
-</html>
-"""
+# 1. API 키 설정
+if "GEMINI_API_KEY" not in st.secrets:
+    st.error("Secrets에 키가 없습니다! 설정을 확인해 주세요.")
+else:
+    api_key = st.secrets["GEMINI_API_KEY"]
+    # 구글 서버 설정 초기화
+    genai.configure(api_key=api_key)
+    
+    # 사이드바 설정
+    st.sidebar.header("출제 옵션")
+    subject = st.sidebar.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
+    num_q = st.sidebar.slider("문항 수", 1, 10, 5) # 일단 5문제로 테스트
 
-async def fetch_questions(model, start_num, end_num, subject, difficulty):
-    prompt = f"수능 수학 {subject} 과목 {start_num}~{end_num}번 문항을 HTML <div>로 만들어. 난이도: {difficulty}. 설명 없이 코드만 출력."
-    try:
-        await asyncio.sleep(1.0) # 무료 한도 방지를 위해 지연 시간을 1초로 늘림
-        response = await model.generate_content_async(prompt)
-        return response.text.replace('```html', '').replace('```', '')
-    except Exception as e:
-        return f"<p style='color:red;'>⚠️ {start_num}번 생성 실패: {e}</p>"
+    if st.sidebar.button("🚀 출제 시작"):
+        # [핵심] 404 에러를 피하기 위해 가장 낮은 사양의 모델을 정식 명칭으로 호출
+        try:
+            model = genai.GenerativeModel('gemini-1.5-flash-8b') # 가장 에러 없는 모델
+            
+            all_exam_text = ""
+            progress_bar = st.progress(0)
+            
+            for i in range(1, num_q + 1):
+                st.write(f"⏳ {i}번 문제 만드는 중...")
+                
+                # 아주 단순한 요청 (에러 방지용)
+                prompt = f"수능 수학 {subject} 과목의 {i}번 문제를 HTML <div> 태그로 만들어줘. 수식은 ( )를 써줘."
+                
+                # 1문제씩 차례대로 호출
+                response = model.generate_content(prompt)
+                q_text = response.text.replace('```html', '').replace('```', '')
+                
+                # 화면에 즉시 표시
+                st.markdown(q_text, unsafe_allow_html=True)
+                all_exam_text += q_text
+                
+                # 무료 한도를 위해 2초씩 강제 휴식
+                progress_bar.progress(i / num_q)
+                time.sleep(2.0)
+            
+            st.success("✅ 출제 완료!")
+            st.download_button("📥 결과 저장(HTML)", data=all_exam_text, file_name="exam.html")
 
-async def generate_exam(model, total_questions, subject, difficulty):
-    chunk_size = 5
-    tasks = [fetch_questions(model, i, min(i+chunk_size-1, total_questions), subject, difficulty) 
-             for i in range(1, total_questions + 1, chunk_size)]
-    results = await asyncio.gather(*tasks)
-    return "".join(results)
-
-st.sidebar.header("설정")
-subject = st.sidebar.selectbox("과목", ["미적분", "확률과 통계", "수학 I, II"])
-num_questions_str = st.sidebar.radio("문항 수", ["5문항", "10문항", "30문항"])
-difficulty = st.sidebar.select_slider("난이도", options=["개념", "실전", "킬러"])
-
-if st.sidebar.button("🚀 모의고사 생성 시작"):
-    try:
-        API_KEY = st.secrets["GEMINI_API_KEY"]
-        
-        # [핵심 필살기] 베타(v1beta)를 무시하고 정식 버전(v1) 통로를 사용하도록 강제 설정
-        genai.configure(api_key=API_KEY, transport='rest') # 통신 방식을 rest로 강제
-        
-        # 모델 경로에 정식 버전임을 명시하여 404 원천 차단
-        model = genai.GenerativeModel(model_name='models/gemini-1.5-flash-latest') 
-        
-        total_q = int(num_questions_str.split("문항")[0])
-        st.info(f"⏳ {total_q}문항 생성 중... 이번에는 정말 뚫립니다!")
-        
-        html_content = asyncio.run(generate_exam(model, total_q, subject, difficulty))
-        final_html = HTML_TEMPLATE.replace("{content}", html_content)
-        
-        st.success("✅ 드디어 완료!")
-        st.download_button("📥 시험지 다운로드", data=final_html, file_name="exam.html", mime="text/html")
-        st.components.v1.html(final_html, height=800, scrolling=True)
-
-    except Exception as e:
-        st.error(f"❌ 전체 오류: {e}")
+        except Exception as e:
+            # 에러 발생 시 아주 상세하게 출력하여 원인 파악
+            st.error(f"❌ 접속 오류 발생: {e}")
+            st.info("이 에러는 구글 서버가 일시적으로 거부하는 것입니다. 10분 뒤에 다시 시도해 보세요.")
 
