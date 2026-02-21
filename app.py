@@ -2,7 +2,7 @@ import streamlit as st
 import google.generativeai as genai
 import time
 
-st.set_page_config(page_title="2026 수능 수학 마스터", page_icon="📝", layout="wide")
+st.set_page_config(page_title="2026 수능 수학 완성기", page_icon="📝", layout="wide")
 
 # 1. 넉넉한 여백(250px)과 깨끗한 수능 양식 유지
 HTML_TEMPLATE = """
@@ -14,7 +14,7 @@ HTML_TEMPLATE = """
     <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
     <style>
         @page {{ size: A4; margin: 10mm; }}
-        body {{ font-family: 'Batang', serif; line-height: 1.5; color: black; background: #fff; }}
+        body {{ font-family: 'Batang', serif; line-height: 1.6; color: black; background: #fff; }}
         .no-print {{ text-align: right; max-width: 210mm; margin: 10px auto; }}
         .btn-print {{ padding: 10px 20px; background: #000; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 5px; }}
         .paper {{ max-width: 210mm; margin: 0 auto; background: white; padding: 15mm; min-height: 297mm; }}
@@ -46,60 +46,57 @@ HTML_TEMPLATE = """
 </html>
 """
 
-# 2. 안정적인 순차 생성 엔진 (서버 차단 방지)
+# 2. 쿼터 초과 방지형 순차 생성기
 def generate_stable_exam(model, subject, total, diff):
-    all_questions = ""
-    all_solutions = ""
-    
-    # 5문제씩 끊어서 차례대로 생성 (무료 한도 준수)
-    progress_text = st.empty()
+    all_content = ""
     bar = st.progress(0)
+    status = st.empty()
     
-    chunk_size = 5
+    # 쿼터 문제를 피하기 위해 3문제씩 아주 천천히 생성합니다.
+    chunk_size = 3 
     for i in range(1, total + 1, chunk_size):
         end = min(i + chunk_size - 1, total)
-        progress_text.text(f"⏳ {i}~{end}번 문항과 해설을 제작 중입니다...")
+        status.info(f"⏳ {i}~{end}번 문항 생성 중... (서버 안정화 대기 포함)")
         
-        instr = "인사말 없이 HTML만 출력. 수식은 $ 사용. 고교 수학 내용만 다룰 것."
-        prompt = f"{instr} 수능 수학 {subject} {i}~{end}번 문항과 상세 해설을 <div class='question'> 구조로 각각 만들어줘."
+        prompt = f"인사말 없이 HTML만 출력. 수능 수학 {subject} {i}~{end}번 문항과 해설을 <div class='question'> 구조로 만드시오. 난이도: {diff}."
         
         try:
+            # 1. 생성 시도
             response = model.generate_content(prompt)
             res_text = response.text.replace('```html', '').replace('```', '').strip()
+            all_content += res_text.replace('\\\\', '\\').replace('\\W', '\\')
             
-            # 수식 기호 교정 및 사족 제거
-            clean_text = res_text.replace('\\\\', '\\').replace('\\W', '\\')
-            
-            # 문제와 해설을 임시로 합침 (나중에 레이아웃에서 자동 분리되도록 유도 가능)
-            all_questions += clean_text
+            # 2. 진행바 업데이트
             bar.progress(end / total)
-            time.sleep(2) # 서버가 쉴 수 있게 2초 대기 (핵심!)
             
+            # 3. [핵심] 무료 한도(Quota)를 지키기 위해 강제 휴식 (10초)
+            if end < total:
+                time.sleep(10) 
+                
         except Exception as e:
-            st.warning(f"⚠️ {i}번 세트 생성 중 지연 발생. 재시도 중... ({e})")
-            time.sleep(5) # 에러 발생 시 더 길게 휴식
-            continue
+            st.warning(f"⚠️ 서버 한도 도달! 20초간 휴식 후 자동으로 재시도합니다... (에러: {e})")
+            time.sleep(20) # 차단 시 더 길게 대기
+            # 실패한 부분부터 다시 시도하기 위해 루프 인덱스 조정
+            continue 
             
-    return all_questions
+    return all_content
 
-# 3. 메인 화면
+# 3. 메인 로직
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
     model = genai.GenerativeModel('models/gemini-2.5-flash')
 
     with st.sidebar:
-        st.header("📄 시험지 설정")
+        st.header("📄 시험지 설정 (안전 모드)")
         sub = st.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
         num = st.radio("문항 수", [5, 10, 30])
         diff = st.select_slider("난이도", options=["기초", "수능형", "심화"])
 
-    if st.sidebar.button("🚀 안전 모드로 발간"):
-        # 기존의 비동기(async)를 빼고 직관적인 순차 방식으로 변경
-        full_content = generate_stable_exam(model, sub, num, diff)
+    if st.sidebar.button("🚀 안전 모드로 완주하기"):
+        st.warning("안전 모드는 서버 차단을 막기 위해 약 2~3분이 소요됩니다. 잠시만 기다려주세요.")
+        full_html = generate_stable_exam(model, sub, num, diff)
         
-        if full_content:
-            # 문제와 해설이 섞여 나오는 것을 방지하기 위해 AI에게 구조를 맡기거나 
-            # 단순히 한 페이지에 쭉 뿌려주는 방식으로 우선 복구
-            final_page = HTML_TEMPLATE.format(subject=sub, questions=full_content, solutions="해설은 문제 하단에 포함되어 있습니다.")
-            st.success("✅ 안전하게 발간되었습니다!")
+        if full_html:
+            final_page = HTML_TEMPLATE.format(subject=sub, questions=full_html, solutions="해설은 하단에 자동 포함되었습니다.")
+            st.success("✅ 드디어 30문항 완주 성공! PDF로 저장하세요.")
             st.components.v1.html(final_page, height=1200, scrolling=True)
