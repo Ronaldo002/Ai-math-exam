@@ -1,62 +1,25 @@
 import streamlit as st
 import google.generativeai as genai
-import time
 
-st.set_page_config(page_title="AI 모의고사 생성기", page_icon="📝", layout="wide")
-st.title("📝 AI 수능 모의고사 생성기 (안전 모드)")
+st.title("🆘 API 연결 상태 점검")
 
-# 1. API 키 설정 (금고에서 가져오기)
-try:
-    API_KEY = st.secrets["GEMINI_API_KEY"]
-    genai.configure(api_key=API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except:
-    st.error("API 키 설정에 문제가 있습니다. Streamlit Cloud의 Secrets 설정을 확인해주세요.")
-
-# 2. 사이드바 설정
-st.sidebar.header("설정")
-subject = st.sidebar.selectbox("과목", ["미적분", "확률과 통계", "수학 I, II"])
-num_questions_str = st.sidebar.radio("문항 수", ["5문항", "10문항", "30문항"])
-total_q = int(num_questions_str.split("문항")[0])
-
-# 3. 메인 로직
-if st.sidebar.button("🚀 시험지 생성 시작"):
-    all_content = ""
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    display_area = st.container() # 문제가 하나씩 표시될 공간
-
-    for i in range(1, total_q + 1):
-        status_text.text(f"⏳ {total_q}문제 중 {i}번 문제를 만드는 중...")
-        
-        # AI에게 1문제씩만 요청 (가장 안전한 방법)
-        prompt = f"수능 수학 {subject} 과목의 {i}번 문제를 HTML <div> 태그 형식으로 만들어줘. 수식은 MathJax를 사용하고, 다른 설명 없이 코드만 줘."
-        
-        try:
-            response = model.generate_content(prompt)
-            q_html = response.text.replace('```html', '').replace('```', '')
-            all_content += q_html
-            
-            # 화면에 즉시 미리보기 업데이트
-            with display_area:
-                st.markdown(q_html, unsafe_allow_html=True)
-            
-            # 진행도 업데이트
-            progress_bar.progress(i / total_q)
-            
-            # 무료 API 한도를 위해 아주 짧게 쉬기 (0.2초)
-            time.sleep(0.2)
-            
-        except Exception as e:
-            st.error(f"{i}번 생성 중 오류 발생. 잠시 후 다시 시도하거나 문항 수를 줄여주세요.")
-            break
-
-    status_text.success(f"✅ 총 {total_q}문제 생성 완료!")
+# 1. 금고(Secrets)에 키가 있는지 확인
+if "GEMINI_API_KEY" not in st.secrets:
+    st.error("❌ 서버 금고(Secrets)에 'GEMINI_API_KEY'가 저장되어 있지 않습니다!")
+    st.info("해결법: Streamlit Cloud 설정 -> Settings -> Secrets에 키를 입력했는지 확인하세요.")
+else:
+    st.success("✅ 금고에서 API 키를 찾았습니다.")
     
-    # 전체 다운로드 버튼
-    st.download_button(
-        label="📥 전체 시험지 HTML 다운로드",
-        data=all_content,
-        file_name="exam.html",
-        mime="text/html"
-    )
+    try:
+        # 2. 실제로 구글 서버에 인사해보기
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        
+        with st.spinner("구글 AI에게 인사 건네는 중..."):
+            response = model.generate_content("안녕? 연결 잘 됐니? 딱 한 마디만 해줘.")
+            st.write("🤖 AI의 대답:", response.text)
+            st.balloons() # 성공하면 풍선이 터집니다!
+            
+    except Exception as e:
+        st.error(f"❌ 구글 서버 연결 실패: {e}")
+        st.info("참고: API 키가 잘못되었거나, 무료 한도(RPM/RPD)를 초과했을 때 발생합니다.")
