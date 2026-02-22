@@ -8,6 +8,7 @@ import json
 import time
 import threading
 import re
+import uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -87,7 +88,7 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": "객관식", "domain": f"{choice_subject} 전범위"})
     return blueprint
 
-# --- 4. HTML/CSS 템플릿 ---
+# --- 4. HTML/CSS 템플릿 (선지 여백 확장) ---
 def get_html_template(subject, pages_html, solutions_html):
     return f"""
     <!DOCTYPE html>
@@ -114,8 +115,11 @@ def get_html_template(subject, pages_html, solutions_html):
             .question-box {{ position: relative; line-height: 2.0; font-size: 11pt; padding-left: 36px; margin-bottom: 45px; text-align: justify; word-break: break-all; }}
             .q-num {{ position: absolute; left: 0; top: 4px; font-weight: 800; border: 2px solid #000; width: 25px; height: 25px; text-align: center; line-height: 23px; font-size: 11.5pt; background: #fff; }}
             .q-score {{ font-weight: 700; font-size: 10.5pt; margin-left: 5px; }}
-            .options-container {{ margin-top: 25px; display: flex; justify-content: space-between; font-size: 10.5pt; padding: 0 5px; }}
+            
+            /* 객관식 선지 완벽 분리 및 디자인 개선 */
+            .options-container {{ margin-top: 35px; display: flex; justify-content: space-between; font-size: 10.5pt; padding: 10px 5px; }}
             .options-container span {{ display: inline-block; }}
+            
             .condition-box {{ border: 1.5px solid #000; padding: 10px 15px; margin: 10px 0; font-weight: bold; background: #fafafa; }}
             .sol-section {{ border-top: 5px double #000; padding-top: 40px; }}
             .sol-item {{ margin-bottom: 35px; padding-bottom: 20px; border-bottom: 1px dashed #eee; line-height: 1.85; font-size: 10.5pt; }}
@@ -134,11 +138,26 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. 문항 텍스트 정제 필터 (DB 오류 방어) ---
+# --- 5. [수식 자동 교정] Math Polisher ---
+def polish_math(text):
+    """AI가 대충 적은 기호를 정식 LaTeX로 실시간 교정합니다."""
+    if not text: return ""
+    # log_2 -> \log_{2} 변환 (이탤릭체 깨짐 방지)
+    text = re.sub(r'(?<!\\)log_([a-zA-Z0-9]+)', r'\\log_{\1}', text)
+    # log x -> \log x 변환
+    text = re.sub(r'(?<!\\)log\s', r'\\log ', text)
+    # ln_2 -> \ln_{2} 변환
+    text = re.sub(r'(?<!\\)ln_([a-zA-Z0-9]+)', r'\\ln_{\1}', text)
+    # 시그마, 적분 강제 변환
+    text = text.replace('Σ', r'\sum').replace('∫', r'\int')
+    return text
+
 def process_question_data(item):
+    """DB 데이터 복구 및 수식 렌더링 최적화"""
     q_text = item.get("question", "")
     opts = item.get("options", [])
     
+    # 1. 과거 DB 데이터의 선지 분리 복구
     if not opts and "①" in q_text:
         parts = q_text.split("①")
         q_text = parts[0].strip()
@@ -149,45 +168,54 @@ def process_question_data(item):
     elif opts and "①" in q_text:
         q_text = q_text.split("①")[0].strip()
         
+    # 2. 텍스트 내 수식 교정기 가동
+    q_text = polish_math(q_text)
+    
     return q_text, opts
 
-# --- 6. 창의성 스펙트럼 다중 문항 생성 로직 ---
+# --- 6. 다중 문항 자동 공장 로직 ---
 sem = asyncio.Semaphore(6)
 
 async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     
+    # Batch ID 부여 (유사 문항 중복 출제 방지용)
+    batch_id = str(uuid.uuid4())
+    
     if q_info['score'] == 4:
-        diff_instruction = "수능 4점 심화. (가), (나) 조건 박스 <div class='condition-box'>(가) ...<br>(나) ...</div> 필수."
-        sol_instruction = "단계별(Step 1...)로 <div class='sol-step'> 태그 사용해 해설."
+        diff_instruction = "수능 4점 심화. (가), (나) 조건 박스 <div class='condition-box'>(가) ...<br>(나) ...</div> 필수 포함."
+        sol_instruction = "해설은 논리적 단계별(Step 1...)로 <div class='sol-step'> 태그를 사용해 작성."
     else:
         diff_instruction = "수능 2~3점 기본 응용. 계산 위주 명료하게 출제."
-        sol_instruction = "수식 위주로 간결하게 작성."
+        sol_instruction = "수식 전개 위주로 간결하게 작성."
 
-    type_instruction = "5지선다 객관식입니다. 'question' 텍스트 안에는 절대 ①~⑤ 선지를 쓰지 말고, 오직 'options' 배열에만 5개의 선지를 분리해서 넣으세요." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 [] 로 두세요."
+    type_instruction = "5지선다 객관식. 'question' 텍스트 안에는 절대 ①~⑤ 선지를 쓰지 말고, 오직 'options' 배열에만 5개의 선지를 분리해서 넣을 것." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 [] 로 둘 것."
 
-    # 수식 포맷팅 강력 제어 (조건 박스 내부 수식 누락 방지 포함)
     prompt = f"""
     단원: {q_info['domain']} | 배점: {q_info['score']}점 | 유형: {q_info['type']}
     
-    [🚨 초강력 필수 규칙 - 위반 시 에러 발생]
+    [🚨 초강력 필수 규칙 - 위반 시 에러]
     1. 100% 한국어.
-    2. [수식 완벽 규격화]: 모든 변수명과 수식은 예외 없이 $ $ 로 감싸서 정식 LaTeX 문법을 사용할 것. 
-       - 특히 (가), (나) 조건 박스 안의 적분(\int), 시그마(\sum) 등 모든 수학 기호도 반드시 $ $ 안에 넣을 것!
-       - 로그: 무조건 `\\log_{{a}}{{x}}` (밑은 반드시 _{{}} 처리)
-       - 수열 및 지수: 무조건 `a_{{n+1}}`, `2^{{x-1}}` 처럼 첨자에 중괄호 {{}} 필수.
+    2. [수식 완벽 규격화]: 한 글자의 변수명(x, y, n 등)과 모든 수식은 무조건 $ $ 로 감싸서 정식 LaTeX 문법 사용!
+       - 로그: 무조건 `\\log_{{a}}{{x}}` (그냥 log_2 절대 금지)
+       - 시그마, 극한 기호: 무조건 `\\sum`, `\\lim` 사용.
+       - 수열 및 지수: 무조건 `a_{{n+1}}` 처럼 첨자에 중괄호 {{}} 필수.
     3. {diff_instruction}
     4. {sol_instruction}
-    5. [선지 분리 강제]: {type_instruction} "question"에는 ①, ② 기호 절대 금지.
+    5. [선지 분리 강제]: {type_instruction} "question"에는 ①, ② 기호 절대 금지!
+    
+    단순 숫자만 바꾸지 말고, 아래 비율로 {batch_size}개의 독립적 문항을 만드세요:
+    - 3개: 기본 변형 (숫자, 부호만 변경)
+    - 4개: 응용 변형 (구하는 대상을 역으로 묻기 등 비틀기)
+    - 3개: 창의적 변형 (새로운 상황, 참신한 융합)
     
     오직 아래 JSON 배열(Array) 형식만 반환:
     [
         {{
-            "question": "(문제 텍스트만! 선지 기호 절대 금지)",
+            "question": "(문제 텍스트만)",
             "options": ["답1", "답2", "답3", "답4", "답5"],
             "solution": "(해설 및 정답 1)"
-        }},
-        ... ({batch_size}개 반복)
+        }}, ...
     ]
     """
 
@@ -208,6 +236,7 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
                 parsed_questions = []
                 for data in data_list:
                     parsed_questions.append({
+                        "batch_id": batch_id, # [핵심] 중복 방지 태그 
                         "sub": q_info['sub'], "diff": q_info['diff'], 
                         "score": q_info['score'], "type": q_info['type'], "domain": q_info['domain'],
                         "question": data.get("question", "오류"), 
@@ -219,33 +248,54 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
                 if attempt == retry - 1: return []
                 await asyncio.sleep(2 ** attempt)
 
-async def get_or_generate_question(q_info, used_ids):
-    available_qs = bank_db.search((QBank.domain == q_info['domain']) & (QBank.type == q_info['type']) & (QBank.score == q_info['score']))
-    fresh_qs = [q for q in available_qs if q.doc_id not in used_ids]
-    
-    if fresh_qs:
-        selected = random.choice(fresh_qs)
-        used_ids.add(selected.doc_id)
-        return {
-            "num": q_info['num'], "score": q_info['score'], "type": q_info['type'],
-            "question": selected['question'], "options": selected.get('options', []),
-            "solution": selected['solution'], "source": "DB"
-        }
-    
+# --- 7. [동시성 제어] 중복 출제 원천 차단 Orchestrator ---
+# DB 검색 시 발생하는 Race Condition(비슷한 문제 동시 선택)을 막기 위한 자물쇠(Lock)
+db_lock = asyncio.Lock()
+
+async def safe_get_or_generate(q_info, used_ids, used_batch_ids):
+    async with db_lock:
+        available_qs = bank_db.search((QBank.domain == q_info['domain']) & (QBank.type == q_info['type']) & (QBank.score == q_info['score']))
+        
+        # [핵심] 이번 시험지에 이미 쓰인 Batch ID(같은 묶음)는 완전히 배제합니다!
+        fresh_qs = []
+        for db_q in available_qs:
+            if db_q.doc_id in used_ids: continue
+            if db_q.get('batch_id') and db_q.get('batch_id') in used_batch_ids: continue
+            fresh_qs.append(db_q)
+        
+        if fresh_qs:
+            selected = random.choice(fresh_qs)
+            used_ids.add(selected.doc_id)
+            if 'batch_id' in selected:
+                used_batch_ids.add(selected['batch_id'])
+            return {
+                "num": q_info['num'], "score": q_info['score'], "type": q_info['type'],
+                "question": selected['question'], "options": selected.get('options', []),
+                "solution": selected['solution'], "source": "DB"
+            }
+            
+    # DB에 신선한(다른 묶음의) 문제가 없으면 새로 AI 호출 (Lock 외부에서 실행하여 속도 보장)
     new_qs = await generate_batch_ai_qs(q_info, batch_size=10)
-    if new_qs:
-        first_q = new_qs[0]
-        first_q['num'] = q_info['num']
-        return {**first_q, "source": "AI", "raw_batch": new_qs}
-    else:
-        return {"num": q_info['num'], "score": q_info['score'], "type": q_info['type'], "question": "API 오류", "options": [], "solution": "오류", "source": "ERROR"}
+    
+    async with db_lock:
+        if new_qs:
+            first_q = new_qs[0]
+            first_q['num'] = q_info['num']
+            used_ids.add("temp_ai")
+            if 'batch_id' in first_q:
+                used_batch_ids.add(first_q['batch_id'])
+            return {**first_q, "source": "AI", "raw_batch": new_qs}
+        else:
+            return {"num": q_info['num'], "score": q_info['score'], "type": q_info['type'], "question": "API 오류", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def generate_exam_orchestrator(choice_subject, total_num, custom_score=None):
     blueprint = get_exam_blueprint(choice_subject, total_num, custom_score)
     start_time = time.time()
-    used_ids = set()
     
-    tasks = [get_or_generate_question(q, used_ids) for q in blueprint]
+    used_ids = set()
+    used_batch_ids = set() # 한 시험지 내 유사 문항 중복 출제 차단용
+    
+    tasks = [safe_get_or_generate(q, used_ids, used_batch_ids) for q in blueprint]
     results = await asyncio.gather(*tasks)
     
     for res in results:
@@ -266,7 +316,7 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
                 if opts and len(opts) >= 1:
                     spans = []
                     for idx, opt in enumerate(opts[:5]):
-                        # [버그 수정됨] 오직 ①~⑤ 기호나 "1.", "2)" 형태만 정밀하게 타격하여 삭제하고, 진짜 숫자 정답(0, 195 등)은 살립니다!
+                        # 숫자 정답 보호 & 불필요한 기호 완벽 제거
                         clean_opt = re.sub(r'^([①②③④⑤]|[1-5][\.\)])\s*', '', str(opt)).strip()
                         spans.append(f"<span>{chr(9312+idx)} {clean_opt}</span>")
                     opt_html = f"<div class='options-container'>{''.join(spans)}</div>"
@@ -276,14 +326,14 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
                 opt_html = ""
             
             q_content += f"<div class='question-box'><span class='q-num'>{item['num']}</span> {q_text} <span class='q-score'>[{item['score']}점]</span>{opt_html}</div>"
-            sol_html += f"<div class='sol-item'><b>{item['num']}번 해설:</b> {item['solution']}</div>"
+            sol_html += f"<div class='sol-item'><b>{item['num']}번 해설:</b> {polish_math(item['solution'])}</div>"
         
         pages_html += f"<div class='paper'><div class='header'><h1>2026학년도 대학수학능력시험 모의평가</h1><h3>수학 영역 ({choice_subject})</h3></div><div class='question-grid'>{q_content}</div></div>"
     
     db_hits = sum(1 for r in results if r.get('source') == 'DB')
     return pages_html, sol_html, time.time() - start_time, db_hits
 
-# --- 7. 백그라운드 DB 파밍 스레드 ---
+# --- 8. 백그라운드 무한 생성 스레드 ---
 def run_auto_farmer():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -300,9 +350,7 @@ async def auto_farm_loop():
                 
                 q_info = {"sub": sub, "diff": diff, "score": score, "type": q_type, "domain": f"{sub} 핵심 랜덤"}
                 batch_qs = await generate_batch_ai_qs(q_info, batch_size=10, retry=1)
-                
-                for q in batch_qs:
-                    bank_db.insert(q)
+                for q in batch_qs: bank_db.insert(q)
             await asyncio.sleep(20) 
         except Exception:
             await asyncio.sleep(20)
@@ -312,7 +360,7 @@ if 'auto_farmer_started' not in st.session_state:
     t.start()
     st.session_state.auto_farmer_started = True
 
-# --- 8. UI 및 세션 관리 ---
+# --- 9. UI 및 세션 관리 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 
 if 'verified' not in st.session_state: st.session_state.verified = False
@@ -370,8 +418,7 @@ with st.sidebar:
                         tasks = [generate_batch_ai_qs(q_info, batch_size=10) for _ in range(10)]
                         res = await asyncio.gather(*tasks)
                         for batch in res:
-                            for q in batch:
-                                bank_db.insert(q)
+                            for q in batch: bank_db.insert(q)
                     asyncio.run(stock_db())
                     st.success("100문제 충전 완료!")
                     st.rerun()
@@ -384,10 +431,10 @@ if st.session_state.verified:
         st.info(f"📊 남은 횟수: {remain} | 과목: {choice_sub} | 난이도: {diff_info}")
         
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"DB 검색 및 자동 복구 렌더링 진행 중..."):
+            with st.spinner(f"DB 검색 및 수식 자동 교정 동시 진행 중..."):
                 p, s, elapsed, db_hits = asyncio.run(generate_exam_orchestrator(choice_sub, num, custom_score_val))
                 
-                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 스펙트럼 자동 생성: {num - db_hits}개)")
+                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 자동 생성: {num - db_hits}개)")
                 st.components.v1.html(get_html_template(choice_sub, p, s), height=1400, scrolling=True)
                 
                 if email_input != ADMIN_EMAIL:
