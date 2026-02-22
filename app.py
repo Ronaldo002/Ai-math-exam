@@ -23,7 +23,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 (충돌 방지 최적화) ---
+# --- 2. DB 및 전역 락 (ID 충돌 방지) ---
 @st.cache_resource
 def get_databases():
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
@@ -37,20 +37,24 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 정제 및 옵션 처리 ---
-def polish_math_meta(text):
+# --- 3. [업데이트] 수식 및 텍스트 정밀 세척 엔진 ---
+def polish_output(text):
     if not text: return ""
-    # 불필요한 가이드 문구(image_10833d) 삭제
-    text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
+    # 1. 쓸데없는 메타데이터 문구 제거
+    text = re.sub(r'^(과목|단원|배점|유형|난이도):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    # 2. 수식 깨짐(image_125785) 보정: frac -> \frac 등 누락된 백슬래시 자동 복구
+    for word in ['frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 'to', 'infty', 'sin', 'cos', 'tan']:
+        text = re.sub(rf'(?<!\\){word}', rf'\\{word}', text)
+    # 3. 중복 배점 표시 제거
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     return text.strip()
 
-def clean_option_text(text):
-    # 선지 번호 찌꺼기만 정밀 제거
-    return re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
+def clean_option(text):
+    # 선지 번호 기호 제거
+    clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
+    return polish_output(clean)
 
 def safe_save_to_bank(batch):
-    """백그라운드 스레드에서 안전하게 저장"""
     def _bg_save():
         with DB_LOCK:
             for q in batch:
@@ -60,7 +64,31 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. HTML 템플릿 (수식 조판 및 선지 레이아웃) ---
+# --- 4. [정밀 조절] 수능형 30문항 블루프린트 ---
+def get_exam_blueprint(choice_sub, total_num, custom_score=None):
+    blueprint = []
+    if total_num == 30:
+        # 공통과목 (수학 I, II): 1~22번
+        for i in range(1, 23):
+            if i in [1, 2]: score, diff = 2, "기초"
+            elif i in [15, 22]: score, diff = 4, "최고난도 킬러"
+            elif i in [9, 10, 11, 12, 13, 14, 20, 21]: score, diff = 4, "준킬러/킬러"
+            else: score, diff = 3, "보통"
+            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "diff": diff, "type": "객관식" if i <= 15 else "단답형"})
+        
+        # 선택과목: 23~30번
+        for i in range(23, 31):
+            if i == 23: score, diff = 2, "기초"
+            elif i == 30: score, diff = 4, "최고난도 킬러"
+            elif i in [28, 29]: score, diff = 4, "준킬러"
+            else: score, diff = 3, "보통"
+            blueprint.append({"num": i, "sub": choice_sub, "score": score, "diff": diff, "type": "객관식" if i <= 28 else "단답형"})
+    else:
+        for i in range(1, total_num + 1):
+            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "diff": "보통", "type": "객관식"})
+    return blueprint
+
+# --- 5. HTML 템플릿 (수식 렌더링 최적화) ---
 def get_html_template(p_html, s_html, subject):
     return f"""
     <!DOCTYPE html>
@@ -68,23 +96,13 @@ def get_html_template(p_html, s_html, subject):
     <head>
         <meta charset="utf-8">
         <script>
-            window.MathJax = {{
-                tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }},
-                options: {{ processHtmlClass: 'mathjax-process' }}
-            }};
+            window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }}, chmth: {{ scale: 1.05 }} }};
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <script>
-            // 브라우저 단에서 lim 수직 정렬 및 첨자 자동 교정
             document.addEventListener("DOMContentLoaded", function() {{
                 const content = document.body.innerHTML;
-                let fixed = content
-                    .replace(/\\\\lim/g, "\\\\displaystyle \\\\lim")
-                    .replace(/lim /g, "\\\\displaystyle \\\\lim ")
-                    .replace(/->/g, "\\\\to")
-                    .replace(/([a-zA-Z])_([a-zA-Z0-9])/g, "$1_{{$2}}")
-                    .replace(/([a-zA-Z0-9])\\\\^([a-zA-Z0-9])/g, "$1^{{$2}}");
-                document.body.innerHTML = fixed;
+                document.body.innerHTML = content.replace(/\\\\lim/g, "\\\\displaystyle \\\\lim").replace(/->/g, "\\\\to");
             }});
         </script>
         <style>
@@ -94,48 +112,41 @@ def get_html_template(p_html, s_html, subject):
             .paper-container {{ display: flex; flex-direction: column; align-items: center; padding: 20px 0; }}
             .paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); position: relative; }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; margin-bottom: 35px; padding-bottom: 10px; }}
-            .header h1 {{ font-weight: 800; font-size: 26pt; margin: 0; }}
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; min-height: 230mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            .question-box {{ position: relative; line-height: 2.8; font-size: 11pt; padding-left: 25px; margin-bottom: 60px; text-align: justify; }}
+            .question-box {{ position: relative; line-height: 2.1; font-size: 11pt; padding-left: 25px; margin-bottom: 45px; text-align: justify; }}
             .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 12pt; }}
-            .options-container {{ margin-top: 35px; display: flex; flex-wrap: wrap; gap: 15px 5px; font-size: 10.5pt; }}
+            .options-container {{ margin-top: 25px; display: flex; flex-wrap: wrap; gap: 10px 5px; font-size: 10.5pt; }}
             .options-container span {{ flex: 1 1 18%; min-width: 130px; white-space: nowrap; }}
             .condition-box {{ border: 1.5px solid #000; padding: 12px; margin: 15px 0; background: #fafafa; font-weight: 700; }}
             .sol-item {{ margin-bottom: 35px; border-bottom: 1px dashed #eee; padding-bottom: 15px; }}
-            mjx-container[display="true"] {{ margin: 15px 0 !important; display: block; }}
         </style>
     </head>
-    <body class="mathjax-process"><div class="paper-container">{p_html}<div class="paper"><h2 style="text-align:center;">[정답 및 해설]</h2>{s_html}</div></div></body>
+    <body><div class="paper-container">{p_html}<div class="paper"><h2>[정답 및 해설]</h2>{s_html}</div></div></body>
     </html>
     """
 
-# --- 5. 수능 블루프린트 ---
-def get_exam_blueprint(choice_sub, total_num, custom_score=None):
-    blueprint = []
-    if total_num == 30:
-        for i in range(1, 23):
-            score = 2 if i in [1, 2] else 4 if i in [15, 21, 22] else 3
-            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식" if i <= 15 else "단답형"})
-        for i in range(23, 31):
-            score = 2 if i in [23, 24] else 4 if i in [29, 30] else 3
-            blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식" if i <= 28 else "단답형"})
-    else:
-        for i in range(1, total_num + 1):
-            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식"})
-    return blueprint
-
 # --- 6. AI 생성 및 오케스트레이터 ---
-async def generate_batch_ai(q_info, size=10):
+async def generate_batch_ai(q_info, size=5):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
-    prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']}
-[규칙] 1. 수식 $ $ 필수. 2. 극한 lim x->0 형식 사용. 3. 도형 <svg> 필요시 포함.
-JSON 배열 {size}개: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
-    try:
-        res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
-        return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "score": q_info['score'], "type": q_info.get('type','객관식')} for d in json.loads(res.text.strip())]
-    except: return []
+    # 4점 킬러 난이도 강화 지시
+    killer_prompt = "최고난도 문항은 여러 단원의 개념을 복합하고 고도의 추론 능력을 요구하도록 구성할 것." if "킬러" in q_info['diff'] else ""
+    prompt = f"""과목:{q_info['sub']} | 난이도:{q_info['diff']} | 배점:{q_info['score']}
+[필수 규칙]
+1. 수식은 무조건 $ $ 사용. 분수는 \\frac{{a}}{{b}}, 기호는 \\theta, \\pi 처럼 백슬래시 필수.
+2. 5지선다는 무조건 5개의 선지를 'options' 배열에 넣을 것.
+3. 문제 지문에 쓸데없는 말(과목명, 난이도 등) 절대 포함 금지. 오직 문제만.
+4. {killer_prompt}
+JSON 배열 {size}개 생성: [{{ "question": "...", "options": ["...","...","...","...","..."], "solution": "..." }}]"""
+    
+    for _ in range(3): # 재시도로 지연 현상 방지
+        try:
+            res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
+            data = json.loads(res.text.strip())
+            return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
+        except: await asyncio.sleep(1)
+    return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
     with DB_LOCK:
@@ -147,10 +158,10 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
         return {**sel, "num": q_info['num'], "source": "DB"}
     new_batch = await generate_batch_ai(q_info, size=5)
     if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    return {"num": q_info['num'], "question": "지연 발생.. 재시도 부탁드립니다.", "options": [], "solution": "오류"}
+    return {"num": q_info['num'], "question": "문제 생성 중 지연 발생..", "options": [], "solution": "오류"}
 
-async def run_orchestrator(sub, num, score_v=None):
-    blueprint = get_exam_blueprint(sub, num, score_v)
+async def run_orchestrator(choice_sub, num, score_v=None):
+    blueprint = get_exam_blueprint(choice_sub, num, score_v)
     start_time = time.time()
     used_ids, used_batch_ids = set(), set()
     tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in blueprint]
@@ -165,47 +176,23 @@ async def run_orchestrator(sub, num, score_v=None):
         pair = results[i:i+2]
         q_cont = ""
         for item in pair:
-            q_text = polish_math_meta(item.get("question", ""))
+            q_text = polish_output(item.get("question", ""))
             opts = item.get("options", [])
             opt_html = ""
             if item.get('type') == '객관식' and opts:
-                spans = "".join([f"<span>{chr(9312+j)} {clean_option_text(o)}</span>" for j, o in enumerate(opts[:5])])
+                # 5지선다 보장 렌더링
+                spans = "".join([f"<span>{chr(9312+j)} {clean_option(o)}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
-            s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math_meta(item.get('solution',''))}</div>"
-        
-        # SyntaxError(image_12497b) 방지를 위한 깔끔한 f-string 처리
-        header_html = f"<div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({sub})</h3></div>"
-        p_html += f"<div class='paper'>{header_html}<div class='question-grid'>{q_cont}</div></div>"
-        
+            s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_output(item.get('solution',''))}</div>"
+        p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
     return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 7. 백그라운드 가속 파밍 엔진 ---
-def run_auto_farmer():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    while True:
-        try:
-            with DB_LOCK: cur_len = len(bank_db)
-            if cur_len < 10000:
-                sub = random.choice(["수학 I, II", "미적분", "확률과 통계", "기하"])
-                batch = loop.run_until_complete(generate_batch_ai({"sub": sub, "score": random.choice([2,3,4]), "type":"객관식"}, size=10))
-                if batch:
-                    with DB_LOCK:
-                        for q in batch:
-                            if not bank_db.search(QBank.question == q['question']): bank_db.insert(q)
-            time.sleep(15)
-        except: time.sleep(30)
-
-if 'farmer' not in st.session_state:
-    threading.Thread(target=run_auto_farmer, daemon=True).start()
-    st.session_state.farmer = True
-
-# --- 8. UI 및 인증 ---
+# --- 7. UI 및 인증 ---
 def send_verification_email(receiver, code):
     try:
-        msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
-        msg.attach(MIMEText(f"번호: [{code}]", 'plain'))
+        msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[Premium 수능수학] 인증번호"
+        msg.attach(MIMEText(f"인증번호: [{code}]", 'plain'))
         s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(SENDER_EMAIL, SENDER_PASS); s.send_message(msg); s.quit()
         return True
     except: return False
@@ -231,16 +218,15 @@ with st.sidebar:
 
     if st.session_state.v:
         st.divider()
-        mode = st.radio("모드", ["맞춤 문항", "30문항 풀세트"])
-        sub = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
-        num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
-        # 난이도(배점) 기능 완벽 복구
-        score_v = int(st.selectbox("문항 난이도 (배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
+        mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
+        sub_choice = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
+        num_choice = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
+        score_choice = int(st.selectbox("문항 난이도 (배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
-        with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)} / 10000")
+        with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
 if st.session_state.v and btn:
-    with st.spinner("DB 가속 파밍 및 문법 에러 방어 엔진 가동 중..."):
-        p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
-        st.success(f"✅ 완료! ({elap:.1f}초)")
-        st.components.v1.html(get_html_template(p, s, sub), height=1200, scrolling=True)
+    with st.spinner("수능 규격 엔진 가동 및 정밀 조판 중..."):
+        p, s, elap, hits = asyncio.run(run_orchestrator(sub_choice, num_choice, score_choice))
+        st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
+        st.components.v1.html(get_html_template(p, s, sub_choice), height=1200, scrolling=True)
