@@ -6,6 +6,7 @@ import smtplib
 import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import time
 
 # --- 1. 환경 설정 및 API 보안 ---
 if "PAID_API_KEY" in st.secrets:
@@ -73,7 +74,7 @@ def get_exam_blueprint(choice_subject, total_num):
             blueprint.append({"num": i, "sub": choice_subject, "diff": "표준", "score": 3})
     return blueprint
 
-# --- 4. 디자인이 강화된 HTML/CSS 템플릿 ---
+# --- 4. [수정됨] 수식 줄간격 및 가독성 최적화 템플릿 ---
 def get_html_template(subject, pages_html, solutions_html):
     return f"""
     <!DOCTYPE html>
@@ -81,29 +82,57 @@ def get_html_template(subject, pages_html, solutions_html):
     <head>
         <meta charset="utf-8">
         <script>
+            /* 수식과 한글 줄간격을 완벽하게 맞추는 설정 */
             window.MathJax = {{
                 tex: {{ inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$', '$$']] }},
-                chtml: {{ scale: 1.05 }}
+                chtml: {{ scale: 0.98, matchFontHeight: true }} 
             }};
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700;800&display=swap');
-            * {{ font-family: 'Nanum Myeongjo', serif !important; word-break: keep-all; letter-spacing: -0.6px; }}
+            
+            * {{ font-family: 'Nanum Myeongjo', serif !important; word-break: keep-all; letter-spacing: -0.5px; }}
             body {{ background: #f0f2f6; margin: 0; padding: 0; color: #000; }}
+            
             .paper-container {{ display: flex; flex-direction: column; align-items: center; padding: 20px 0; }}
-            .paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; min-height: 297mm; position: relative; box-shadow: 0 5px 20px rgba(0,0,0,0.08); }}
+            .paper {{ 
+                background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; 
+                min-height: 297mm; position: relative; box-shadow: 0 5px 20px rgba(0,0,0,0.08); 
+            }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; padding-bottom: 12px; margin-bottom: 35px; }}
             .header h1 {{ font-weight: 800; font-size: 26pt; margin: 0; letter-spacing: -1.5px; }}
             .header h3 {{ font-weight: 700; font-size: 14pt; margin-top: 10px; }}
+            
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; min-height: 220mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            .question-box {{ position: relative; line-height: 1.85; font-size: 11pt; padding-left: 38px; margin-bottom: 45px; text-align: justify; }}
-            .q-num {{ position: absolute; left: 0; top: 2px; font-weight: 800; border: 2px solid #000; width: 26px; height: 26px; text-align: center; line-height: 23px; font-size: 12pt; background: #fff; }}
+            
+            /* 문제 박스 줄간격 완벽 조정 */
+            .question-box {{ 
+                position: relative; 
+                line-height: 2.0; /* 수식을 위해 넉넉한 줄간격 확보 */
+                font-size: 11pt; 
+                padding-left: 36px; 
+                margin-bottom: 45px; 
+                text-align: justify; 
+            }}
+            
+            /* 번호 박스 수직 정렬 보정 */
+            .q-num {{ 
+                position: absolute; left: 0; top: 4px; /* 텍스트 시작점과 정렬 */
+                font-weight: 800; border: 2px solid #000; width: 25px; height: 25px; 
+                text-align: center; line-height: 23px; font-size: 11.5pt; background: #fff; 
+            }}
+            
             .q-score {{ font-weight: 700; font-size: 10.5pt; margin-left: 5px; }}
+            
             .sol-section {{ border-top: 5px double #000; padding-top: 40px; }}
-            .sol-item {{ margin-bottom: 30px; padding-bottom: 15px; border-bottom: 1px dashed #eee; line-height: 1.7; }}
-            mjx-container {{ vertical-align: middle !important; margin: 0 3px !important; }}
+            .sol-item {{ margin-bottom: 30px; padding-bottom: 15px; border-bottom: 1px dashed #eee; line-height: 1.8; }}
+            
+            /* 인라인 수식 튀어오름 방지 */
+            mjx-container:not([display="true"]) {{ 
+                margin: 0 2px !important; 
+            }}
         </style>
     </head>
     <body>
@@ -115,21 +144,23 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. 속도 극대화 30스레드 병렬 생성 ---
+# --- 5. [수정됨] 1분 내외 초고속 생성 로직 ---
 def fetch_paged_question(q_info):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
-    prompt = f"""
-    당신은 수능 출제 위원입니다. {q_info['sub']} {q_info['diff']} 난이도 {q_info['num']}번 문항을 출제하세요. 배점은 {q_info['score']}점입니다.
-    - 인사말 금지. 오직 HTML 태그만 출력. 수식은 $ LaTeX 사용.
-    형식: [문항] <div class='question-box'><span class='q-num'>{q_info['num']}</span> 문제내용... <span class='q-score'>[{q_info['score']}점]</span></div> ---SPLIT--- [해설] <div class='sol-item'><b>{q_info['num']}번 해설:</b> 풀이...</div>
-    """
+    # 프롬프트를 간결하게 최적화하여 AI 응답 속도 극대화
+    prompt = f"수능 {q_info['sub']} {q_info['diff']} {q_info['num']}번 출제. 배점 {q_info['score']}점. 인사말 금지, HTML만 출력. 수식은 $ LaTeX. 형식: [문항] <div class='question-box'><span class='q-num'>{q_info['num']}</span> 내용... <span class='q-score'>[{q_info['score']}점]</span></div> ---SPLIT--- [해설] <div class='sol-item'><b>{q_info['num']}번:</b> 풀이...</div>"
+    
     try:
         response = model.generate_content(prompt)
         return response.text.replace("```html", "").replace("```", "").strip()
-    except: return f"Error {q_info['num']}"
+    except Exception as e: 
+        return f"Error {q_info['num']}"
 
 def generate_exam(choice_subject, total_num):
     blueprint = get_exam_blueprint(choice_subject, total_num)
+    start_time = time.time()
+    
+    # 30개의 스레드를 동시에 풀가동하여 시간 단축
     with concurrent.futures.ThreadPoolExecutor(max_workers=30) as executor:
         results = list(executor.map(fetch_paged_question, blueprint))
     
@@ -150,12 +181,11 @@ def generate_exam(choice_subject, total_num):
             <div class="question-grid">{q_content}</div>
         </div>
         """
-    return pages_html, sol_html
+    return pages_html, sol_html, time.time() - start_time
 
-# --- 6. UI 및 세션 관리 (인증 로직 완벽 복구) ---
+# --- 6. UI 및 세션 관리 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 
-# 세션 초기화
 if 'verified' not in st.session_state: st.session_state.verified = False
 if 'auth_code' not in st.session_state: st.session_state.auth_code = None
 if 'mail_sent' not in st.session_state: st.session_state.mail_sent = False
@@ -164,12 +194,12 @@ with st.sidebar:
     st.title("🎓 본부 인증")
     email_input = st.text_input("이메일 입력", value=ADMIN_EMAIL if st.session_state.verified else "")
     
-    # 관리자 자동 패스
+    # 관리자 자동 인증
     if email_input == ADMIN_EMAIL:
         st.session_state.verified = True
         st.success("👑 관리자 자동 인증 완료")
     
-    # 일반 사용자 OTP 인증 로직
+    # 일반 사용자 OTP 인증
     if not st.session_state.verified:
         if st.button("인증번호 발송"):
             if email_input:
@@ -177,40 +207,46 @@ with st.sidebar:
                 if send_verification_email(email_input, code):
                     st.session_state.auth_code = code
                     st.session_state.mail_sent = True
-                    st.success("인증번호가 발송되었습니다! 메일함을 확인하세요.")
+                    st.success("인증 메일 발송 완료!")
             else:
                 st.warning("이메일을 입력하세요.")
         
-        # 메일 발송이 성공해야만 인증번호 입력창과 확인 버튼이 나타납니다.
         if st.session_state.mail_sent:
             code_input = st.text_input("인증번호 6자리 입력")
             if st.button("인증 확인"):
                 if code_input == st.session_state.auth_code and st.session_state.auth_code:
                     st.session_state.verified = True
-                    st.session_state.mail_sent = False # 성공 시 초기화
-                    st.rerun() # 화면 새로고침하여 발간 패널 표시
+                    st.session_state.mail_sent = False
+                    st.rerun()
                 else:
-                    st.error("인증번호가 일치하지 않습니다. 다시 확인해 주세요.")
+                    st.error("인증번호가 일치하지 않습니다.")
 
-    # 인증 완료 후 컨트롤 패널
+    # [수정됨] 발간 패널 UI
     if st.session_state.verified:
         st.divider()
         mode = st.radio("발간 모드", ["맞춤 문항 발간", "30문항 풀세트 발간"])
         choice_sub = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
         num = 30 if mode == "30문항 풀세트 발간" else st.slider("문항 수", 2, 10, 4, step=2)
-        generate_btn = st.button("🚀 초고속 시험지 발간 시작")
+        
+        # 버튼 스타일을 강조하여 시인성 확보
+        generate_btn = st.button("🚀 초고속 시험지 발간 시작", use_container_width=True)
 
-# --- 7. 메인 화면 (시험지 렌더링 및 횟수 제한) ---
+# 메인 화면 영역 (시험지 렌더링)
 if st.session_state.verified:
     can_use, remain = check_user_limit(email_input)
     if can_use:
-        st.info(f"📊 이용 가능 횟수: {remain}")
+        # 상단에 정보 배치
+        st.info(f"📊 이용 가능 횟수: {remain} | 선택과목: {choice_sub}")
+        
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"AI 코어 30개가 동시에 {num}문항을 렌더링 중입니다..."):
-                p, s = generate_exam(choice_sub, num)
-                st.components.v1.html(get_html_template(choice_sub, p, s), height=1200, scrolling=True)
+            with st.spinner(f"AI 코어 30개가 동시에 렌더링 중입니다. 잠시만 기다려주세요..."):
+                p, s, elapsed = generate_exam(choice_sub, num)
                 
-                # 생성 완료 시 일반 유저만 카운트 증가
+                # 생성 완료 시 성공 메시지와 소요 시간 출력
+                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초)")
+                
+                st.components.v1.html(get_html_template(choice_sub, p, s), height=1400, scrolling=True)
+                
                 if email_input != ADMIN_EMAIL:
                     user_data = db.table('users').get(User.email == email_input)
                     db.table('users').update({'count': user_data['count'] + 1}, User.email == email_input)
