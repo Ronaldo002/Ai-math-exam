@@ -23,7 +23,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 ---
+# --- 2. DB 및 전역 락 (ID 충돌 방지) ---
 @st.cache_resource
 def get_databases():
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
@@ -37,17 +37,20 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 수식 및 텍스트 정제 엔진 (image_10f365 해결) ---
+# --- 3. [업데이트] 수식 정밀 교정 엔진 (극한 기호 수직 정렬 포함) ---
 def polish_math(text):
     if not text: return ""
-    # 불필요 메타데이터 삭제
+    # 불필요 메타데이터 삭제 (image_10833d 방지)
     text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     
-    # [핵심] 분수 및 극한 기호 LaTeX 표준화
-    # lim x->0 형태를 \lim_{x \to 0}으로 강제 변환
-    text = re.sub(r'lim\s*([a-zA-Z])\s*->\s*([0-9a-zA-Z\d]+)', r'\\lim_{\1 \\to \2}', text)
-    # 일반적인 수식 기호 보정
+    # [핵심] 극한 기호 아래에 변수가 오도록 \displaystyle \lim_{x \to 0} 강제 적용
+    # 1. AI가 이미 \lim_{x \to 0} 형태로 준 경우
+    text = re.sub(r'\\lim\s*_{?\s*([a-zA-Z0-9\s\\to\infty]+)\s*}?', r'\\displaystyle \\lim_{\1}', text)
+    # 2. AI가 lim x->0 텍스트 형태로 준 경우 보정
+    text = re.sub(r'lim\s+([a-zA-Z0-9]+)\s*->\s*([0-9a-zA-Z\infty]+)', r'\\displaystyle \\lim_{\1 \\to \2}', text)
+    
+    # 일반 수식 기호 보정 (첨자 중괄호 등)
     text = re.sub(r'log_([a-zA-Z0-9{}]+)', r'\\log_{\1}', text)
     text = re.sub(r'([a-zA-Z])_([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1_{\2}', text)
     text = re.sub(r'([a-zA-Z0-9])\^([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1^{\2}', text)
@@ -55,9 +58,10 @@ def polish_math(text):
     return text.strip()
 
 def clean_option(text):
+    # 선지 번호 기호 제거
     return re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
 
-# --- 4. [해결사] 지연 발생 방지용 백그라운드 저장 ---
+# --- 4. DB 안전 저장 시스템 ---
 def safe_save_to_bank(batch):
     def _bg_save():
         with DB_LOCK:
@@ -68,7 +72,7 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. HTML 템플릿 (image_10f345 선지 정렬 문제 해결) ---
+# --- 5. HTML 템플릿 (극한 기호 및 선지 레이아웃 최적화) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -79,12 +83,7 @@ def get_html_template(p_html, s_html):
             window.MathJax = {{
                 tex: {{ 
                     inlineMath: [['$', '$']], 
-                    displayMath: [['$$', '$$']],
-                    processEscapes: true
-                }},
-                chtml: {{ 
-                    scale: 1.05,
-                    matchFontHeight: true
+                    displayMath: [['$$', '$$']]
                 }}
             }};
         </script>
@@ -98,33 +97,45 @@ def get_html_template(p_html, s_html):
             .header {{ text-align: center; border-bottom: 2.5px solid #000; margin-bottom: 35px; padding-bottom: 10px; }}
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 50px; min-height: 230mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            .question-box {{ position: relative; line-height: 2.2; font-size: 11pt; padding-left: 25px; margin-bottom: 50px; text-align: justify; }}
+            
+            /* [개선] 수직 극한 기호를 위해 줄 간격 확보 (line-height 상향) */
+            .question-box {{ 
+                position: relative; 
+                line-height: 2.5; 
+                font-size: 11pt; 
+                padding-left: 25px; 
+                margin-bottom: 55px; 
+                text-align: justify; 
+            }}
             .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 12pt; }}
             
-            /* [개선] 선지 정렬 로직: 내용이 길면 자동으로 줄바꿈 처리 */
+            /* [개선] 선지 자동 정렬 및 줄바꿈 */
             .options-container {{ 
                 margin-top: 30px; 
                 display: flex; 
-                flex-wrap: wrap; /* 선지가 길면 다음 줄로 */
+                flex-wrap: wrap; 
                 gap: 15px 5px;
                 font-size: 10.5pt; 
             }}
             .options-container span {{ 
-                flex: 1 1 18%; /* 기본 5열 배치 시도 */
+                flex: 1 1 18%; 
                 min-width: fit-content;
                 white-space: nowrap;
             }}
             
             .condition-box {{ border: 1.5px solid #000; padding: 12px; margin: 15px 0; background: #fafafa; font-weight: 700; }}
             .sol-item {{ margin-bottom: 35px; border-bottom: 1px dashed #eee; padding-bottom: 15px; }}
+            
+            /* 수식 가독성 향상 */
             mjx-container {{ margin: 0 2px !important; }}
+            mjx-container[display="true"] {{ margin: 12px 0 !important; }}
         </style>
     </head>
     <body><div class="paper-container">{p_html}<div class="paper"><h2 style="text-align:center;">[정답 및 해설]</h2>{s_html}</div></div></body>
     </html>
     """
 
-# --- 6. AI 생성 및 병렬 엔진 ---
+# --- 6. AI 생성 및 오케스트레이터 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
@@ -147,8 +158,8 @@ async def generate_batch_ai(q_info, size=5):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['domain']} | 배점:{q_info['score']}
-[규칙] 1. 수식 $ $ 필수. 분수는 \\frac{{a}}{{b}}, 극한은 \\lim_{{x \\to 0}} 형태 엄수.
-2. 선지가 길 경우 텍스트를 줄이지 말고 그대로 출력할 것.
+[규칙] 1. 수식 $ $ 필수. 분수 \\frac{{a}}{{b}}, 극한 \\lim_{{x \\to 0}} 형태 엄수.
+2. 모든 수식은 LaTeX 표준 문법을 지킬 것.
 3. 오직 JSON 배열로 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
     
     for attempt in range(3):
@@ -167,9 +178,11 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
         sel = random.choice(fresh)
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB"}
+    
     new_batch = await generate_batch_ai(q_info)
     if new_batch:
-        return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
+        res = {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
+        return res
     return {"num": q_info['num'], "question": "서버 지연 중..", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def run_orchestrator(choice_sub, num, score_val=None):
@@ -180,6 +193,7 @@ async def run_orchestrator(choice_sub, num, score_val=None):
     results = await asyncio.gather(*tasks)
     results.sort(key=lambda x: x.get('num', 999))
     
+    # DB 백그라운드 저장
     all_new = [r['full_batch'] for r in results if r.get('source') == "AI" and "full_batch" in r]
     if all_new:
         flat_new = [item for sublist in all_new for item in sublist]
@@ -194,21 +208,20 @@ async def run_orchestrator(choice_sub, num, score_val=None):
             opts = item.get("options", [])
             opt_html = ""
             if item.get('type') == '객관식' and opts:
-                # 선지 번호 보정 및 정렬 적용
                 spans = "".join([f"<span>{chr(9312+j)} {polish_math(clean_option(o))}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
+            
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
-            s_html += f"<div class='sol-item'><b>{item.get('num',0)}번:</b> {polish_math(item.get('solution',''))}</div>"
+            s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
+    
     return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 7. 이메일 인증 및 UI ---
+# --- 7. UI 로직 ---
 def send_verification_email(receiver_email, code):
     try:
         msg = MIMEMultipart()
-        msg['From'] = SENDER_EMAIL
-        msg['To'] = receiver_email
-        msg['Subject'] = "[Premium 수능수학] 인증번호"
+        msg['From'] = SENDER_EMAIL; msg['To'] = receiver_email; msg['Subject'] = "[Premium 수능수학] 인증번호"
         msg.attach(MIMEText(f"인증번호: [{code}]", 'plain'))
         server = smtplib.SMTP('smtp.gmail.com', 587); server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASS); server.send_message(msg); server.quit()
@@ -246,7 +259,7 @@ with st.sidebar:
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
 if st.session_state.v and 'btn' in locals() and btn:
-    with st.spinner("수식 최적화 및 렌더링 중..."):
+    with st.spinner("수식 정밀 렌더링 및 시험지 조판 중..."):
         p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
         st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
