@@ -11,7 +11,6 @@ else:
     st.error("Streamlit Secrets에 PAID_API_KEY를 등록해주세요!")
     st.stop()
 
-# DB 설정
 db = TinyDB('service_data.json')
 User = Query()
 
@@ -43,9 +42,7 @@ def get_html_template(subject, questions_html, solutions_html):
                 <h1>2026학년도 대학수학능력시험 모의평가</h1>
                 <h3>수학 영역 ({subject})</h3>
             </div>
-            <div class="content">
-                {questions_html}
-            </div>
+            <div class="content">{questions_html}</div>
             <div class="sol-section">
                 <h2 style="text-align:center;">[정답 및 해설]</h2>
                 {solutions_html}
@@ -83,24 +80,22 @@ def check_user_access(email):
     return (remaining > 0), remaining
 
 def generate_exam(subject, difficulty, count, email):
+    # [수정포인트] models/ 를 제거하여 404 에러를 해결했습니다.
     model = genai.GenerativeModel('gemini-2.0-flash')
     q_html_list, s_html_list = [], []
     
-    # --- 진행률 표시 레이아웃 ---
     progress_bar = st.progress(0)
-    percent_text = st.empty() # % 텍스트 표시용
-    status_text = st.empty()  # 현재 번호 표시용
+    percent_text = st.empty()
+    status_text = st.empty()
     
     for i in range(1, count + 1):
-        # 퍼센트 계산
         percent_val = int((i / count) * 100)
-        status_text.markdown(f"✍️ **{i}번 문항** 출제 및 검수 중...")
+        status_text.markdown(f"✍️ **{i}번 문항** 출제 중...")
         percent_text.markdown(f"📊 **진행률: {percent_val}%**")
         
         prompt = f"""
         수능 수학 {subject} {difficulty} 난이도 {i}번 문항을 출제하세요.
-        인사말 없이 아래 형식만 딱 맞춰서 출력하세요.
-        
+        인사말 없이 아래 형식만 지키세요.
         [문항]
         <div class='question'><span class='q-num'>{i}.</span> 문제 내용...</div>
         ---SPLIT---
@@ -119,43 +114,38 @@ def generate_exam(subject, difficulty, count, email):
             else:
                 q_html_list.append(f"<div class='question'><span class='q-num'>{i}.</span>{raw_text}</div>")
             
-            # 진행 바 업데이트
             progress_bar.progress(i / count)
             time.sleep(0.5)
         except Exception as e:
-            st.error(f"{i}번 생성 중 에러: {e}")
+            st.error(f"{i}번 생성 에러: {e}")
             continue
             
-    # 완료 메시지
-    status_text.success(f"✅ 총 {count}문항 발간이 완료되었습니다!")
-    percent_text.empty() # 진행률 텍스트 제거
+    status_text.success(f"✅ {count}문항 발간 완료!")
+    percent_text.empty()
     
-    # 사용자 카운트 업데이트
     user_data = db.table('users').get(User.email == email)
     db.table('users').update({'count': user_data['count'] + 1}, User.email == email)
     
     return get_html_template(subject, "".join(q_html_list), "".join(s_html_list))
 
-# --- 4. UI 구성 ---
+# --- 4. UI ---
 st.set_page_config(page_title="Premium 수능 수학 생성기", layout="wide")
 
 with st.sidebar:
     st.title("🎓 Premium 모드")
-    email = st.text_input("사용자 이메일 주소", placeholder="user@example.com")
+    email = st.text_input("사용자 이메일 주소")
     st.divider()
     num = st.slider("발간 문항 수", 1, 30, 5)
     sub = st.selectbox("과목 선택", ["수학 I, II", "미적분", "확률과 통계"])
     diff = st.select_slider("난이도 설정", options=["표준", "준킬러", "킬러"])
-    st.info("실시간 진행률 표시 기능이 활성화되었습니다.")
 
 if email:
     is_active, left = check_user_access(email)
     if is_active:
-        st.write(f"✅ 인증 성공! (오늘 남은 횟수: {left}회)")
         if st.button("🚀 프리미엄 시험지 발간"):
             final_html = generate_exam(sub, diff, num, email)
             st.components.v1.html(final_html, height=1200, scrolling=True)
     else:
-        st.error("오늘의 생성 한도(5회)를 초과했습니다. 내일 다시 이용해주세요.")
+        st.error("오늘 한도를 초과했습니다.")
 else:
-    st.info("사이드바에 이메일을 입력하면 프리미엄 엔진이 활성화됩니다.")
+    st.info("이메일을 입력해 주세요.")
