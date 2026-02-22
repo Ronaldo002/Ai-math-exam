@@ -4,103 +4,132 @@ from tinydb import TinyDB, Query
 from datetime import datetime
 import time
 
-# --- 1. 초기 설정 및 보안 ---
-# Streamlit Cloud의 Secrets에 저장된 유료 키를 불러옵니다.
+# --- 1. 환경 설정 및 보안 ---
 if "PAID_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["PAID_API_KEY"])
 else:
-    st.error("설정에서 PAID_API_KEY를 등록해주세요!")
+    st.error("Streamlit Secrets에 PAID_API_KEY를 등록해주세요!")
     st.stop()
 
-# 데이터베이스 설정 (사용자 기록 및 문제 보관용)
 db = TinyDB('service_data.json')
 User = Query()
-Exam = Query()
 
-# --- 2. 핵심 기능 함수 ---
-
-def check_user_access(user_email):
-    """사용자의 오늘 남은 생성 횟수를 확인합니다."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    user_record = db.table('users').get(User.email == user_email)
-    
-    if not user_record:
-        # 신규 사용자 등록
-        db.table('users').insert({'email': user_email, 'count': 0, 'last_date': today})
-        return True, 5
-    
-    if user_record['last_date'] != today:
-        # 날짜가 바뀌었으면 카운트 초기화
-        db.table('users').update({'count': 0, 'last_date': today}, User.email == user_email)
-        return True, 5
-    
-    remaining = 5 - user_record['count']
-    return (remaining > 0), remaining
-
-def generate_math_exam(subject, difficulty, user_email):
-    """Gemini 2.0 유료 API를 사용하여 문제를 생성합니다."""
-    model = genai.GenerativeModel('gemini-2.0-flash')
-    
-    # 프롬프트 고도화 (유료 버전의 지능 활용)
-    prompt = f"""
-    당신은 수능 수학 출제 위원입니다. {subject} 과목의 {difficulty} 난이도 문항을 제작하세요.
-    반드시 다음 형식을 지키세요:
-    1. 문제는 HTML 형식으로 작성하며 수식은 $기호를 사용한 LaTeX로 작성할 것.
-    2. [해설시작]이라는 구분자 뒤에 상세한 풀이 과정을 HTML 형식으로 작성할 것.
-    3. 정답이 선지에 반드시 존재하도록 검토할 것.
+# --- 2. 시험지 HTML/CSS 템플릿 (수식 및 PDF 최적화) ---
+# MathJax(수식)와 html2pdf(PDF저장) 라이브러리를 내장했습니다.
+def get_html_template(subject, questions_html, solutions_html):
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <script src="https://polyfill.io/v3/polyfill.min.js?features=es6"></script>
+        <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap');
+            body {{ font-family: 'Noto Serif KR', serif; background: #f0f2f6; padding: 20px; }}
+            .paper {{ background: white; width: 210mm; margin: 0 auto; padding: 20mm; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 297mm; }}
+            .header {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 30px; }}
+            .columns {{ display: flex; gap: 40px; }}
+            .column {{ flex: 1; }}
+            .question {{ margin-bottom: 40px; position: relative; line-height: 1.8; }}
+            .q-num {{ font-weight: bold; margin-right: 10px; font-size: 1.2em; }}
+            .sol-section {{ page-break-before: always; border-top: 3px double #000; padding-top: 40px; margin-top: 50px; }}
+            .btn-download {{ position: fixed; top: 20px; right: 20px; padding: 12px 24px; background: #ff4b4b; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; z-index: 1000; }}
+        </style>
+    </head>
+    <body>
+        <button class="btn-download" onclick="downloadPDF()">📥 PDF 시험지 다운로드</button>
+        <div id="exam-paper" class="paper">
+            <div class="header">
+                <h1>2026학년도 대학수학능력시험 모의평가</h1>
+                <h3>수학 영역 ({subject})</h3>
+            </div>
+            <div class="columns">
+                <div class="column">{questions_html}</div>
+            </div>
+            <div class="sol-section">
+                <h2 style="text-align:center;">[정답 및 해설]</h2>
+                {solutions_html}
+            </div>
+        </div>
+        <script>
+            function downloadPDF() {{
+                const element = document.getElementById('exam-paper');
+                const opt = {{
+                    margin: 10,
+                    filename: '2026_수능_수학_모의고사.pdf',
+                    image: {{ type: 'jpeg', quality: 0.98 }},
+                    html2canvas: {{ scale: 2 }},
+                    jsPDF: {{ unit: 'mm', format: 'a4', orientation: 'portrait' }}
+                }};
+                html2pdf().set(opt).from(element).save();
+            }}
+        </script>
+    </body>
+    </html>
     """
+
+# --- 3. 핵심 로직 ---
+def check_user_access(email):
+    today = datetime.now().strftime("%Y-%m-%d")
+    user = db.table('users').get(User.email == email)
+    if not user:
+        db.table('users').insert({'email': email, 'count': 0, 'last_date': today})
+        return True, 5
+    if user['last_date'] != today:
+        db.table('users').update({'count': 0, 'last_date': today}, User.email == email)
+        return True, 5
+    return (5 - user['count'] > 0), (5 - user['count'])
+
+def generate_exam(subject, difficulty, count, email):
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    q_html, s_html = "", ""
+    progress = st.progress(0)
     
-    try:
-        response = model.generate_content(prompt)
-        content = response.text.replace('```html', '').replace('```', '').strip()
-        
-        # 생성 성공 시 사용자 카운트 증가
-        current_count = db.table('users').get(User.email == user_email)['count']
-        db.table('users').update({'count': current_count + 1}, User.email == user_email)
-        
-        return content
-    except Exception as e:
-        st.error(f"생성 중 오류 발생: {e}")
-        return None
+    for i in range(1, count + 1):
+        st.write(f"✍️ {i}번 문항 출제 및 검수 중...")
+        prompt = f"""
+        수능 수학 {subject} {difficulty} 난이도 {i}번 문항을 출제하세요.
+        - 문제내용은 <div class='question'><span class='q-num'>{i}.</span>내용</div> 형식으로 작성.
+        - 수식은 반드시 $...$ (인라인) 또는 $$...$$ (블록) 형식을 지킬 것.
+        - 해설은 <div class='sol'><b>{i}번 정답 및 해설:</b> 내용</div> 형식으로 작성.
+        - [해설구분] 이라는 단어로 문제와 해설을 구분할 것.
+        """
+        try:
+            response = model.generate_content(prompt)
+            parts = response.text.split("[해설구분]")
+            q_html += parts[0].replace("```html", "").replace("```", "")
+            if len(parts) > 1:
+                s_html += parts[1].replace("```html", "").replace("```", "")
+            
+            progress.progress(i / count)
+            time.sleep(0.5)
+        except:
+            continue
+            
+    # 카운트 차감
+    curr = db.table('users').get(User.email == email)['count']
+    db.table('users').update({'count': curr + 1}, User.email == email)
+    return get_html_template(subject, q_html, s_html)
 
-# --- 3. UI 레이아웃 (Streamlit) ---
+# --- 4. UI ---
+st.set_page_config(page_title="Premium 수능 수학 생성기", layout="wide")
 
-st.set_page_config(page_title="2026 수능 수학 킬러 마스터", layout="wide")
-
-st.title("♾️ 2026 수능 수학 무한 생성기 (Premium)")
-st.caption("Gemini 2.0 Flash 유료 엔진이 가동 중입니다.")
-
-# 로그인 섹션
 with st.sidebar:
-    st.header("👤 사용자 인증")
-    user_email = st.text_input("이메일 주소를 입력하세요", placeholder="example@mail.com")
-    
-    if user_email:
-        is_active, left_count = check_user_access(user_email)
-        if is_active:
-            st.success(f"오늘 생성 가능 횟수: {left_count}회")
-        else:
-            st.warning("오늘 할당량을 모두 사용하셨습니다.")
-    
+    st.title("🎓 Premium 모드")
+    email = st.text_input("사용자 이메일")
     st.divider()
-    st.info("5,000원 예산 내에서 100명이 함께 사용하는 시스템입니다.")
+    num = st.slider("문항 수", 1, 30, 5)
+    sub = st.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
+    diff = st.select_slider("난이도", options=["표준", "준킬러", "킬러"])
 
-# 메인 화면
-if user_email and is_active:
-    col1, col2 = st.columns(2)
-    with col1:
-        subject = st.selectbox("시험 과목 선택", ["수학 I, II", "미적분", "확률과 통계"])
-    with col2:
-        difficulty = st.select_slider("난이도 설정", options=["표준", "준킬러", "킬러"])
-
-    if st.button("🚀 프리미엄 문항 발간 시작"):
-        with st.spinner("AI 출제위원이 문제를 설계하고 있습니다..."):
-            result = generate_math_exam(subject, difficulty, user_email)
-            if result:
-                # 결과 출력 (HTML 렌더링)
-                st.markdown("---")
-                st.components.v1.html(result, height=1000, scrolling=True)
-                st.success("발간 완료! 위 화면에서 내용을 확인하세요.")
-
-elif not user_email:
-    st.info("좌측 사이드바에서 이메일 인증 후 시작해 주세요.")
+if email:
+    active, left = check_user_access(email)
+    if active:
+        if st.button("🚀 시험지 발간 및 PDF 생성"):
+            final_html = generate_exam(sub, diff, num, email)
+            st.components.v1.html(final_html, height=1200, scrolling=True)
+    else:
+        st.error("오늘의 발간 횟수를 모두 소진했습니다.")
+else:
+    st.info("이메일을 입력하면 프리미엄 엔진이 활성화됩니다.")
