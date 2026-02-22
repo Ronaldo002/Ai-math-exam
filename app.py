@@ -31,21 +31,17 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 (자가 치유 로직 탑재) ---
+# --- 2. DB 및 전역 락 (자가 치유) ---
 @st.cache_resource
 def get_databases():
     try:
-        # 정상적으로 읽히는지 테스트
         u_db = TinyDB('user_registry.json')
         q_db = TinyDB('question_bank.json')
         _ = len(q_db) 
         return u_db, q_db
     except Exception:
-        # JSON 파일이 깨졌을 경우(JSONDecodeError 등) 기존 파일 강제 삭제 후 새 파일 생성
-        if os.path.exists('question_bank.json'):
-            os.remove('question_bank.json')
-        if os.path.exists('user_registry.json'):
-            os.remove('user_registry.json')
+        if os.path.exists('question_bank.json'): os.remove('question_bank.json')
+        if os.path.exists('user_registry.json'): os.remove('user_registry.json')
         return TinyDB('user_registry.json'), TinyDB('question_bank.json')
 
 db, bank_db = get_databases()
@@ -57,7 +53,7 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 초정밀 불량품 폐기소 (Validation Shield) ---
+# --- 3. 초정밀 불량품 폐기소 ---
 def is_valid_question(q, expected_type):
     if not q.get('question') or not str(q.get('question')).strip(): return False
     if not q.get('solution') or not str(q.get('solution')).strip(): return False
@@ -164,23 +160,41 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. 프롬프트 및 메인 화면 엔진 ---
-def build_strict_prompt(q_info, size):
-    diff_guide = ""
-    if q_info['score'] == 4:
-        diff_guide = "[초고난도 변별력] (가), (나) 조건을 포함한 복합 개념 출제." if q_info.get('num', 0) in [15, 22, 30] else "[고난도 4점] 복합 사고력 요구."
-    elif q_info['score'] == 3:
-        diff_guide = "[응용 3점] 수능 3점 수준."
-    else:
-        diff_guide = "[기초 2점] 수능 2점 수준 기초 연산."
+# --- 7. [신규] 다이내믹 창의성 룰렛 (Dynamic Twist Generator) ---
+def get_creative_twist(score):
+    """낮은 난이도 문제에 참신함을 부여하는 룰렛 함수"""
+    if score == 2:
+        twists = [
+            "[단순 연산 회피] 단순 계산식 대신, 낯선 기호를 새롭게 정의하여 그 값을 구하는 2점 문제로 출제.",
+            "[도형/그래프 해석] 간단한 2차원 그래프나 도형의 넓이/길이를 활용하여 개념을 묻는 참신한 2점 문제로 출제.",
+            "[명제/정의] 수식 풀이보다 수학적 개념의 '정의' 자체를 정확히 알고 있는지 묻는 2점 문제로 출제.",
+            "[기본 연산] 수능에 자주 나오는 깔끔하고 정석적인 2점 연산 문제로 출제."
+        ]
+        return random.choice(twists)
+    elif score == 3:
+        twists = [
+            "[실생활 연계] 특정 과학적 현상이나 실생활 데이터를 수학적 함수로 모델링하는 창의적인 문장제 3점 문제로 출제.",
+            "[융합형 문제] 두 가지 이상의 서로 다른 수학 단원 개념이 가볍고 조화롭게 융합된 3점 문제로 출제.",
+            "[조건 추론형] (가), (나) 형태의 간단한 조건을 제시하고 이를 통해 숨겨진 함수나 값을 찾아내는 3점 문제로 출제.",
+            "[대칭성/주기성] 그래프의 대칭성, 주기성, 혹은 평행이동의 직관적인 성질을 활용해야 쉽게 풀리는 3점 문제로 출제.",
+            "[새로운 함수] $h(x) = max(f(x), g(x))$ 와 같이 새로운 함수를 정의하고 그 특징을 묻는 3점 문제로 출제."
+        ]
+        return random.choice(twists)
+    elif score == 4:
+        return "[초고난도 신유형] 기존 기출문제를 암기해서 풀 수 없는, 고도의 추론과 여러 개념의 결합이 필요한 낯선 상황을 제시할 것."
+    return ""
 
+# --- 8. 프롬프트 및 메인 화면 엔진 ---
+def build_strict_prompt(q_info, size):
+    creative_twist = get_creative_twist(q_info['score'])
+    
     opt_rule = "객관식이므로 options 배열에 5개의 선지를 반드시 작성할 것." if q_info['type'] == '객관식' else "주관식(단답형)이므로 options 배열은 비워둘 것([])."
 
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
 [최우선 필수 지시사항] 
 1. 언어: 모든 문제, 해설은 반드시 한국어로 작성 (영어 금지).
 2. 범위: 반드시 '{q_info['sub']}' 교육과정 내에서만 출제.
-3. 난이도: {diff_guide}
+3. 💡 창의성/난이도 조건: {creative_twist}
 4. 유형: {opt_rule}
 5. 형식: 수식 $ $ 필수. 과목명, 배점 등 부가 텍스트 절대 금지.
 JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}]"""
@@ -191,7 +205,7 @@ async def generate_batch_ai(q_info, size=2):
     prompt = build_strict_prompt(q_info, size)
     
     try:
-        res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json"))
+        res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
         raw_text = res.text.strip()
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         data = json.loads(match.group(0)) if match else json.loads(raw_text)
@@ -234,7 +248,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     chunk_size = 2 
     for i in range(0, len(blueprint), chunk_size):
         chunk = blueprint[i : i + chunk_size]
-        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 생성 중... (철통 검수 중)")
+        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 생성 중... (창의성 검수 중)")
         tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
@@ -291,7 +305,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
 
     return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 8. 1 Seed -> 3 Variants 무결점 파밍 엔진 ---
+# --- 9. 무결점 및 창의성 변형 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -303,21 +317,22 @@ def run_auto_farmer():
                 score = random.choice([2, 3, 4])
                 q_type = random.choice(["객관식", "주관식"])
                 
-                diff_guide = "[초고난도 변별력] 복합 개념 융합 출제" if score == 4 else "[응용 3점]" if score == 3 else "[기초 2점]"
+                creative_twist = get_creative_twist(score)
                 opt_rule = "객관식이므로 options 배열에 5개의 선지 필수." if q_type == '객관식' else "주관식(단답형)이므로 options 배열 비울 것([])."
                 
                 prompt = f"""과목:{sub} | 배점:{score} | 유형:{q_type}
 [최우선 필수 지시사항] 
-1. 생성 방식: **먼저 완전히 새로운 창작 문항 1개(Seed)를 만들고, 이어서 그 문항의 숫자나 조건만 살짝 비튼 쌍둥이 유사 문항(Variant) 3개를 작성할 것.**
-2. 언어 및 범위: 무조건 한국어. 반드시 '{sub}' 교육과정 내에서 출제.
-3. 난이도 및 유형: {diff_guide} / {opt_rule}
-4. 형식: 수식 $ $ 필수. 부가 텍스트 절대 금지.
+1. 생성 방식: 완전히 새로운 창작 문항 1개(Seed)를 만들고, 이어서 조건/숫자만 비튼 쌍둥이 유사 문항(Variant) 3개를 작성.
+2. 💡 창의성/난이도 조건: {creative_twist}
+3. 언어 및 범위: 무조건 한국어. 반드시 '{sub}' 교육과정 내에서 출제.
+4. 유형: {opt_rule}
+5. 형식: 수식 $ $ 필수. 부가 텍스트 절대 금지.
 JSON 배열 형태로 총 4개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}, ...]"""
                 
                 res = sync_model.generate_content(
                     prompt, 
                     safety_settings=SAFETY_SETTINGS, 
-                    generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json")
+                    generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json")
                 )
                 
                 match = re.search(r'\[.*\]', res.text.strip(), re.DOTALL)
@@ -337,7 +352,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 9. UI, 인증 및 로그아웃 ---
+# --- 10. UI, 인증 및 로그아웃 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -389,15 +404,35 @@ with st.sidebar:
             st.session_state.verified = False
             st.session_state.user_email = ""
             st.session_state.mail_sent = False
+            if 'confirm_db_reset' in st.session_state:
+                st.session_state.confirm_db_reset = False
             st.rerun()
             
         if st.session_state.user_email == ADMIN_EMAIL:
             st.warning("👑 관리자 권한 활성화")
-            if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
-                with DB_LOCK:
-                    bank_db.truncate()
-                st.success("DB가 완벽히 초기화되었습니다! 이제 깨끗한 쌍둥이 문제들로 자동 파밍됩니다.")
-                st.rerun()
+            
+            if 'confirm_db_reset' not in st.session_state:
+                st.session_state.confirm_db_reset = False
+                
+            if not st.session_state.confirm_db_reset:
+                if st.button("🚨 DB 완전 초기화"):
+                    st.session_state.confirm_db_reset = True
+                    st.rerun()
+            else:
+                st.error("⚠️ 정말로 모든 문제를 삭제하시겠습니까?\n(이 작업은 되돌릴 수 없습니다)")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.button("✔️ 네, 삭제합니다", type="primary"):
+                        with DB_LOCK:
+                            bank_db.truncate()
+                        st.session_state.confirm_db_reset = False
+                        st.success("DB가 완벽히 초기화되었습니다!")
+                        time.sleep(1)
+                        st.rerun()
+                with col2:
+                    if st.button("❌ 취소"):
+                        st.session_state.confirm_db_reset = False
+                        st.rerun()
 
         st.divider()
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
@@ -413,8 +448,7 @@ with st.sidebar:
                 st.caption("🗄️ DB 시스템 자가 치유 중...")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중... (무결점 데이터 검증 및 조판 중)"):
+    with st.spinner("AI 엔진 가동 중... (다양한 창의적 문항 조판 중)"):
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
-
