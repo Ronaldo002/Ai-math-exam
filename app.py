@@ -23,7 +23,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 자물쇠 ---
+# --- 2. DB 및 자물쇠 (동시성 에러 방지) ---
 @st.cache_resource
 def get_databases():
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
@@ -37,15 +37,16 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [혁신] 초간단 텍스트 정제 (에러 원인 정규식 모두 삭제) ---
+# --- 3. 텍스트 정제 및 옵션 처리 ---
 def polish_math(text):
     if not text: return ""
-    # 메타데이터만 삭제 (에러 방지를 위해 수식은 건드리지 않음)
+    # 메타데이터 문구 삭제 (image_10833d 방지)
     text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     return text.strip()
 
 def clean_option(text):
+    # 선지 번호 기호만 정밀하게 제거 (image_060658 방지)
     return re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
 
 def safe_save_to_bank(batch):
@@ -58,7 +59,7 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. [핵심] HTML 템플릿 (자바스크립트 자동 교정 엔진 탑재) ---
+# --- 4. HTML 템플릿 (자바스크립트 수식 교정 엔진 유지) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -67,30 +68,21 @@ def get_html_template(p_html, s_html):
         <meta charset="utf-8">
         <script>
             window.MathJax = {{
-                tex: {{ 
-                    inlineMath: [['$', '$']], 
-                    displayMath: [['$$', '$$']]
-                }},
-                options: {{
-                    processHtmlClass: 'mathjax-process'
-                }}
+                tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }},
+                options: {{ processHtmlClass: 'mathjax-process' }}
             }};
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <script>
-            // 브라우저에서 실행되는 수식 교정 엔진 (파이썬 에러 0%)
+            // 브라우저 단에서 lim 수직 정렬 및 기호 강제 교정
             document.addEventListener("DOMContentLoaded", function() {{
                 const content = document.body.innerHTML;
                 let fixed = content
-                    // 1. 모든 lim를 수직 정렬 규격으로 강제 변환
                     .replace(/\\\\lim/g, "\\\\displaystyle \\\\lim")
                     .replace(/lim /g, "\\\\displaystyle \\\\lim ")
-                    // 2. 화살표 보정
                     .replace(/->/g, "\\\\to")
-                    // 3. 첨자 중괄호 보정
                     .replace(/([a-zA-Z])_([a-zA-Z0-9])/g, "$1_{{$2}}")
                     .replace(/([a-zA-Z0-9])\\^([a-zA-Z0-9])/g, "$1^{{$2}}");
-                
                 document.body.innerHTML = fixed;
             }});
         </script>
@@ -116,26 +108,28 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 5. 생성 및 오케스트레이터 ---
+# --- 5. 수능 블루프린트 (난이도 선택 완벽 대응) ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
         for i in range(1, 23):
             score = 2 if i in [1, 2] else 4 if i in [15, 21, 22] else 3
-            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식" if i <= 15 else "단답형", "domain": "수학 I, II"})
+            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식" if i <= 15 else "단답형"})
         for i in range(23, 31):
             score = 2 if i in [23, 24] else 4 if i in [29, 30] else 3
-            blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식" if i <= 28 else "단답형", "domain": choice_sub})
+            blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식" if i <= 28 else "단답형"})
     else:
+        # 맞춤 문항 모드: 사용자가 선택한 배점(score)을 강제 적용
         for i in range(1, total_num + 1):
-            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "domain": choice_sub})
+            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식"})
     return blueprint
 
+# --- 6. AI 생성 및 엔진 ---
 async def generate_batch_ai(q_info, size=5):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']}
-[규칙] 1. 수식 $ $ 필수. 2. 극한은 lim x->0 형태로만 작성(교정은 엔진이 수행). 3. JSON 배열 {size}개: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
+[규칙] 1. 수식 $ $ 필수. 2. 극한은 lim x->0 형태로 작성. 3. JSON 배열 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
     try:
         res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
         return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in json.loads(res.text.strip())]
@@ -177,7 +171,7 @@ async def run_orchestrator(sub, num, score_v=None):
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
     return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 6. UI ---
+# --- 7. UI 및 인증 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -202,18 +196,21 @@ with st.sidebar:
         if st.session_state.get('mail_sent'):
             c_in = st.text_input("6자리 입력")
             if st.button("확인"):
-                if c_in == st.session_state.auth_code: st.session_state.v = True; st.rerun()
+                if c_in == st.session_state.auth_code:
+                    st.session_state.v = True; st.rerun()
 
     if st.session_state.v:
         st.divider()
         mode = st.radio("모드", ["맞춤 문항", "30문항 풀세트"])
         sub = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
+        # [복구] 난이도(배점) 선택 기능
+        score_v = int(st.selectbox("문항 난이도 (배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
 if st.session_state.v and btn:
-    with st.spinner("수식 조판 최적화 중..."):
-        p, s, elap, hits = asyncio.run(run_orchestrator(sub, num))
+    with st.spinner("모든 기능을 활성화하여 조판 중..."):
+        p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
         st.success(f"✅ 완료! ({elap:.1f}초)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
