@@ -36,44 +36,71 @@ db, bank_db = get_databases()
 User, QBank = Query(), Query()
 DB_LOCK = threading.Lock()
 
-# --- 3. 초정밀 텍스트 정제 엔진 (수식 및 벡터 최적화) ---
+# --- 3. 텍스트 정제 엔진 (수식 및 벡터 최적화) ---
 def polish_output(text):
     if not text: return ""
-    # 불필요한 레이블 제거
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     text = re.sub(r'\[.*?점\]\s*', '', text)
-    
-    # LaTeX 주요 토큰 강제 보정 (깨짐 방지)
-    math_tokens = [
-        'sin', 'cos', 'tan', 'log', 'ln', 'lim', 'exp', 'sqrt', 'vec', 'cdot', 
-        'frac', 'theta', 'pi', 'infty', 'to', 'sum', 'int', 'alpha', 'beta', 'mu', 'sigma', 'lambda'
-    ]
+    math_tokens = ['sin', 'cos', 'tan', 'log', 'ln', 'lim', 'exp', 'sqrt', 'vec', 'cdot', 'frac', 'theta', 'pi', 'infty', 'to', 'sum', 'int', 'alpha', 'beta', 'mu', 'sigma', 'lambda']
     for token in math_tokens:
         text = re.sub(rf'(?<!\\)\b{token}\b', rf'\\{token}', text)
-    
     return text.replace('->', r'\to').strip()
 
 def clean_option(text):
-    # 선지 번호(①~⑤) 제거 후 정제
     clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
     return polish_output(clean)
 
-# --- 4. [핵심] 난이도 및 그림 생성 가이드라인 ---
-def get_pro_guide(score):
-    if score == 2:
-        return """[최우선: 2점 난이도 절대 엄수]
-- 반드시 '1분 이내'에 풀리는 단순 계산형 문항으로 구성할 것.
-- 복잡한 도형 활용이나 다단계 추론은 절대 금지.
-- 예: 단순 지수/로그 연산, 간단한 미분계수 f'(a) 구하기, 극한값 계산."""
-    elif score == 3:
-        return "[3점 응용] 기본 개념 2개를 결합하거나, 교과서 예제 수준의 응용이 필요한 문항."
-    else:
-        return """[4점 킬러/준킬러]
-- (가), (나) 조건을 활용한 복합 추론 필수.
-- 케이스 분류가 필요하거나 신유형 아이디어를 포함할 것.
-- 변별력이 확보되는 고난도 문항으로 설계할 것."""
+# --- 4. 무결점 검수 엔진 ---
+def is_valid_question(q, expected_type):
+    if not q.get('topic') or not q.get('question') or not q.get('solution'): return False
+    opts = q.get('options', [])
+    if expected_type == '객관식' and (not isinstance(opts, list) or len(opts) != 5): return False
+    return True
 
-# --- 5. HTML/CSS 템플릿 (진짜 그림 및 선지 정렬 최적화) ---
+def safe_save_to_bank(batch, expected_type):
+    def _bg_save():
+        with DB_LOCK:
+            for q in batch:
+                if is_valid_question(q, expected_type):
+                    try:
+                        if not bank_db.search(QBank.question == q.get("question", "")):
+                            bank_db.insert(q)
+                    except: continue
+    threading.Thread(target=_bg_save, daemon=True).start()
+
+# --- 5. 수능 표준 블루프린트 (2026 규격) ---
+def get_exam_blueprint(choice_sub, total_num, custom_score=None):
+    blueprint = []
+    m1_topics = ["지수함수와 로그함수", "삼각함수", "수열"]
+    m2_topics = ["함수의 극한과 연속", "다항함수의 미분법", "다항함수의 적분법"]
+    choice_map = {
+        "미적분": ["수열의 극한", "미분법", "적분법"],
+        "확률과 통계": ["경우의 수", "확률", "통계"],
+        "기하": ["이차곡선", "평면벡터", "공간도형과 공간좌표"]
+    }
+    
+    if total_num == 30:
+        for i in range(1, 16):
+            sub = "수학 I" if i % 2 != 0 else "수학 II"
+            topic = m1_topics[(i//2)%3] if sub == "수학 I" else m2_topics[(i//2)%3]
+            score = 2 if i <= 3 else 4 if i in [9,10,11,12,13,14,15] else 3
+            blueprint.append({"num": i, "sub": sub, "topic": topic, "score": score, "type": "객관식"})
+        for i in range(16, 22):
+            sub = "수학 II" if i % 2 == 0 else "수학 I"
+            topic = m2_topics[i%3] if sub == "수학 II" else m1_topics[i%3]
+            score = 4 if i in [21, 22] else 3
+            blueprint.append({"num": i, "sub": sub, "topic": topic, "score": score, "type": "주관식"})
+        for i in range(23, 31):
+            topic = choice_map[choice_sub][(i-23)%3]
+            score = 2 if i == 23 else 4 if i in [28, 29, 30] else 3
+            blueprint.append({"num": i, "sub": choice_sub, "topic": topic, "score": score, "type": "객관식" if i <= 28 else "주관식"})
+    else:
+        topics = choice_map.get(choice_sub, ["공통 개념"])
+        for i in range(1, total_num + 1):
+            blueprint.append({"num": i, "sub": choice_sub, "topic": topics[(i-1)%len(topics)], "score": custom_score or 3, "type": "객관식"})
+    return blueprint
+
+# --- 6. HTML/CSS 템플릿 (SVG 및 선지 정렬 최적화) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html><html><head><meta charset="utf-8">
@@ -94,23 +121,23 @@ def get_html_template(p_html, s_html):
         @media print {{ .no-print {{ display: none; }} body {{ padding: 0; }} .paper {{ box-shadow: none; margin: 0; }} }}
     </style></head>
     <body>
-        <div class="no-print" style="text-align:center; margin-bottom:20px;">
-            <button style="background:#2e7d32; color:white; padding:12px 24px; border:none; border-radius:5px; cursor:pointer; font-weight:bold;" onclick="window.print()">🖨️ PDF 다운로드 / 인쇄</button>
-        </div>
+        <div class="no-print" style="text-align:center; margin-bottom:20px;"><button style="background:#2e7d32; color:white; padding:12px 24px; border:none; border-radius:5px; cursor:pointer; font-weight:bold;" onclick="window.print()">🖨️ PDF 다운로드 / 인쇄</button></div>
         <div class="paper-container">{p_html}<div class="paper"><h2 style="text-align:center;">[정답 및 해설]</h2>{s_html}</div></div>
     </body></html>
     """
 
-# --- 6. 생성 엔진 (SVG 직접 그리기 지시) ---
+# --- 7. 다이내믹 창의성 & 난이도 가이드 ---
+def get_pro_guide(score):
+    if score == 2: return "[최우선: 2점 난이도 절대 엄수] 1분 이내 단순 계산형. 복잡한 추론/도형 금지."
+    elif score == 3: return "[3점 응용] 기본 개념 2개 결합 또는 교과서 예제 수준 응용."
+    else: return "[4점 킬러] (가), (나) 조건 활용 복합 추론. 케이스 분류 필수."
+
+# --- 8. 생성 및 오케스트레이터 ---
 def build_strict_prompt(q_info, size):
     guide = get_pro_guide(q_info['score'])
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['topic']} | 배점:{q_info['score']} | 유형:{q_info['type']}
-[지시] 
-1. 한국어 전용. {guide}
-2. **도형이나 그래프가 필요한 경우, 반드시 `<svg>` 태그를 사용하여 직접 좌표를 계산해 `svg_draw` 필드에 그려낼 것.** (설명만 하지 말 것)
-3. 수식은 $ $ 필수. 벡터는 \\vec{{a}} 사용.
-4. JSON {size}개 생성: 
-[{{ "topic": "{q_info['topic']}", "question": "...", "svg_draw": "<svg ...>...</svg> (없으면 null)", "options": ["선지1",...], "solution": "..." }}]"""
+[지시] 1.한국어 2.{guide} 3.그림필요시 <svg> 작성하여 svg_draw 필드에 주입 4.수식 $ $ 필수 5.JSON {size}개 생성:
+[{{ "topic": "{q_info['topic']}", "question": "...", "svg_draw": "<svg...> (없으면 null)", "options": [...], "solution": "..." }}]"""
     return prompt
 
 async def generate_batch_ai(q_info, size=2):
@@ -122,7 +149,6 @@ async def generate_batch_ai(q_info, size=2):
     except: return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, total_num):
-    # 2문항 쿼터제 및 DB 추출 로직
     with DB_LOCK:
         available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.topic == q_info['topic']) & (QBank.score == q_info['score']))
     
@@ -135,31 +161,26 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, total_num):
         used_ids.add(str(sel.doc_id))
         return {**sel, "num": q_info['num'], "source": "DB"}
     
-    # DB에 없으면 AI 생성
     for _ in range(2):
         new_batch = await generate_batch_ai(q_info, size=2)
         if new_batch:
             sel = new_batch[0]
             topic_counts[sel['topic']] = topic_counts.get(sel['topic'], 0) + 1
             return {**sel, "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    
-    return {"num": q_info['num'], "score": q_info['score'], "type": "객관식", "question": "지연 발생 (재시도 필요)", "options": ["-"]*5, "solution": "-", "source": "ERROR", "svg_draw": None}
+    return {"num": q_info['num'], "score": q_info['score'], "type": "객관식", "question": "지연 발생", "options": ["-"]*5, "solution": "-", "source": "ERROR", "svg_draw": None}
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
-    # 실제 수능 단원 배분 로직
-    topics = {"미적분": ["수열의 극한", "미분법", "적분법"], "확률과 통계": ["경우의 수", "확률", "통계"], "기하": ["이차곡선", "평면벡터", "공간도형"]}[sub_choice]
-    blueprint = [{"num": i+1, "sub": sub_choice, "topic": topics[i % 3], "score": score_choice or 3, "type": "객관식"} for i in range(num_choice)]
-    
+    blueprint = get_exam_blueprint(sub_choice, num_choice, score_choice)
     used_ids, used_batch_ids, topic_counts, results = set(), set(), {}, []
     prog, status = st.progress(0), st.empty()
     
     for q_info in blueprint:
-        status.text(f"⏳ {q_info['num']}번 정밀 조판 및 SVG 도면 작성 중...")
+        status.text(f"⏳ {q_info['num']}번 조판 및 SVG 분석 중...")
         res = await get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, num_choice)
         results.append(res)
         if res.get('source') == "AI" and "full_batch" in res:
             safe_save_to_bank(res['full_batch'], q_info['type'])
-        prog.progress(q_info['num'] / num_choice)
+        prog.progress(q_info['num'] / len(blueprint))
         await asyncio.sleep(0.5)
     
     p_html, s_html = "", ""
@@ -170,36 +191,80 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
         svg = item.get('svg_draw', "")
         diag_html = f"<div class='diagram-container'>{svg}</div>" if svg and "<svg" in svg else ""
         opts_html = "".join([f"<span>{chr(9312+j)} {clean_option(str(o))}</span>" for j, o in enumerate(item.get('options', []))])
-        
         q_html_list.append(f"<div class='question-box'><span class='q-num'>{num}</span> {q_text} <b>[{score}점]</b>{diag_html}<div class='options-container'>{opts_html}</div></div>")
         s_html += f"<div style='margin-bottom:15px;'><b>{num}번:</b> {polish_output(item.get('solution'))}</div>"
 
-    # 페이지당 2문제씩 그리드 배치
     for i in range(0, len(q_html_list), 2):
         chunk = "".join(q_html_list[i:i+2])
         p_html += f"<div class='paper'><div class='header' style='text-align:center; border-bottom:2.5px solid #000; margin-bottom:25px;'><h1>2026 수능 모의평가</h1></div><div class='question-grid'>{chunk}</div></div>"
     
     return get_html_template(p_html, s_html), sum(1 for r in results if r.get('source') == "DB")
 
-# --- 7. UI ---
+# --- 9. [부활] 백그라운드 파밍 엔진 (Seed & Variant) ---
+def run_auto_farmer():
+    sync_model = genai.GenerativeModel('models/gemini-2.0-flash')
+    while True:
+        try:
+            with DB_LOCK: cur_len = len(bank_db)
+            if cur_len < 10000:
+                sub = random.choice(["수학 I", "수학 II", "미적분", "확률과 통계", "기하"])
+                score = random.choice([2, 3, 4])
+                topic = random.choice(["전체"]) # 동적 주제 선정
+                prompt = f"과목:{sub} | 배점:{score} | [지시] 기준 문항 1개와 변형 문항 3개를 JSON 배열로 생성. 수식 $$, 그림 <svg> 필수."
+                res = sync_model.generate_content(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.9, response_mime_type="application/json"))
+                data = json.loads(res.text.strip())
+                with DB_LOCK:
+                    for q in data:
+                        q.update({"batch_id": str(uuid.uuid4()), "sub": sub, "score": score, "type": "객관식"})
+                        if is_valid_question(q, "객관식"): bank_db.insert(q)
+            time.sleep(15) 
+        except: time.sleep(20)
+
+if 'farmer_running' not in st.session_state:
+    threading.Thread(target=run_auto_farmer, daemon=True).start()
+    st.session_state.farmer_running = True
+
+# --- 10. UI 및 관리자 로직 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
+if 'verified' not in st.session_state: st.session_state.verified, st.session_state.user_email = False, ""
+
 with st.sidebar:
     st.title("🎓 본부 제어실")
-    st.success(f"✅ {ADMIN_EMAIL} 인증됨")
-    if st.button("🚨 전체 DB 초기화 (기존 엉터리 문제 소각)"):
-        with DB_LOCK: bank_db.truncate(); st.rerun()
-    st.divider()
-    sub = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
-    num = st.slider("문항 수", 2, 20, 4, step=2)
-    score = int(st.selectbox("난이도 설정 (2점=기초, 4점=킬러)", ["2", "3", "4"]))
-    btn = st.button("🚀 무결점 발간 시작", use_container_width=True)
+    if not st.session_state.verified:
+        email_in = st.text_input("이메일 입력")
+        if email_in == ADMIN_EMAIL and st.button("관리자 로그인"):
+            st.session_state.verified, st.session_state.user_email = True, ADMIN_EMAIL; st.rerun()
+        elif email_in and st.button("사용자 접속"):
+            st.session_state.verified, st.session_state.user_email = True, email_in; st.rerun()
+    else:
+        st.success(f"✅ {st.session_state.user_email} 인증됨")
+        if st.button("🚪 로그아웃"): st.session_state.verified = False; st.rerun()
+        
+        if st.session_state.user_email == ADMIN_EMAIL:
+            st.warning("👑 관리자 권한")
+            if 'confirm_reset' not in st.session_state: st.session_state.confirm_reset = False
+            if not st.session_state.confirm_reset:
+                if st.button("🚨 전체 DB 초기화"): st.session_state.confirm_reset = True; st.rerun()
+            else:
+                st.error("정말 삭제하시겠습니까?")
+                if st.button("✔️ 삭제 승인"):
+                    with DB_LOCK: bank_db.truncate()
+                    st.session_state.confirm_reset = False; st.rerun()
+                if st.button("❌ 취소"): st.session_state.confirm_reset = False; st.rerun()
 
-if btn:
-    with st.spinner("AI가 SVG 도면을 설계하고 수능 규격에 맞춰 조판 중입니다..."):
+        st.divider()
+        mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
+        sub_choice = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
+        num_choice = st.slider("문항 수", 2, 30, 4, step=2)
+        score_val = int(st.selectbox("난이도 (배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
+        btn = st.button("🚀 발간 시작", use_container_width=True)
+        with DB_LOCK: st.caption(f"🗄️ 무결점 DB: {len(bank_db)} / 10000")
+
+if st.session_state.verified and btn:
+    with st.spinner("AI가 SVG 도면을 설계하고 수능 규격 조판 중..."):
         try:
-            html, db_hits = asyncio.run(run_orchestrator(sub, num, score))
+            html, db_hits = asyncio.run(run_orchestrator(sub_choice, num_choice, score_val))
             st.success(f"✅ 발간 완료! (DB 활용: {db_hits}개)")
             st.components.v1.html(html, height=1200, scrolling=True)
-        except Exception as e:
-            st.error(f"❌ 발간 중 오류 발생: {e}")
+        except Exception as e: st.error(f"❌ 오류: {e}")
 
