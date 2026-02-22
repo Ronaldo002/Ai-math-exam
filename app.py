@@ -37,17 +37,16 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [개선] 수식 및 텍스트 정밀 보정 엔진 ---
+# --- 3. [업데이트] 수식 및 텍스트 정밀 보정 엔진 ---
 def polish_output(text):
     if not text: return ""
-    # 1. 메타데이터 제거
-    text = re.sub(r'^(과목|단원|배점|유형|난이도):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    # 1. 쓸데없는 메타데이터 문구 제거
+    text = re.sub(r'^(과목|단원|배점|유형|난이도|수학 II):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     # 2. 백슬래시 누락 보정 (image_125785 해결)
-    # AI가 frac, theta 등으로 보내면 자동으로 \frac, \theta로 변환
     math_words = ['frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 'to', 'infty', 'sin', 'cos', 'tan', 'sum', 'int']
     for word in math_words:
         text = re.sub(rf'(?<!\\){word}', rf'\\{word}', text)
-    # 3. 배점 기호 중복 제거
+    # 3. 배점 기호 및 중복 텍스트 제거
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     return text.strip()
 
@@ -65,28 +64,22 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. 수능형 블루프린트 (30문항 규격) ---
+# --- 4. 수능형 블루프린트 (30문항 표준 배점) ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
-        for i in range(1, 23):
-            if i in [1, 2]: score, diff = 2, "기초"
-            elif i in [15, 22]: score, diff = 4, "킬러"
-            elif i in [9, 10, 11, 12, 13, 14, 21]: score, diff = 4, "준킬러"
-            else: score, diff = 3, "보통"
-            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "diff": diff, "type": "객관식" if i <= 15 else "단답형"})
-        for i in range(23, 31):
-            if i == 23: score, diff = 2, "기초"
-            elif i == 30: score, diff = 4, "킬러"
-            elif i in [28, 29]: score, diff = 4, "준킬러"
-            else: score, diff = 3, "보통"
-            blueprint.append({"num": i, "sub": choice_sub, "score": score, "diff": diff, "type": "객관식" if i <= 28 else "단답형"})
+        for i in range(1, 23): # 공통과목
+            score = 2 if i in [1, 2, 3] else 4 if i in [9, 10, 11, 12, 13, 14, 15, 20, 21, 22] else 3
+            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식" if i <= 15 else "단답형"})
+        for i in range(23, 31): # 선택과목
+            score = 2 if i == 23 else 4 if i in [28, 29, 30] else 3
+            blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식" if i <= 28 else "단답형"})
     else:
         for i in range(1, total_num + 1):
-            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "diff": "보통", "type": "객관식"})
+            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식"})
     return blueprint
 
-# --- 5. HTML 템플릿 (조판 최적화) ---
+# --- 5. HTML 템플릿 (수능형 고퀄리티 조판) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -121,12 +114,14 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 6. AI 생성 및 분할 처리 (무한 루프 방지) ---
-async def generate_batch_ai(q_info, size=5):
+# --- 6. AI 생성 및 [해결] 분할 처리 엔진 ---
+async def generate_batch_ai(q_info, size=3): # 배치 사이즈를 3개로 더 줄여 안정성 확보
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
-    prompt = f"""과목:{q_info['sub']} | 난이도:{q_info['diff']} | 배점:{q_info['score']}
-[규칙] 1. 수식 $ $ 필수. 2. 분수 \\frac{{a}}{{b}}, 기호 \\theta, \\pi 백슬래시 엄수. 3. 5지선다는 무조건 5개 선지.
+    # 4점 고난도 지침 추가
+    diff_guide = "변별력을 위해 복합 개념을 적용한 킬러급 문제로 구성할 것." if q_info['score'] == 4 else "기초를 묻는 기본 문제로 구성할 것."
+    prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']}
+[규칙] 1. {diff_guide} 2. 수식 $ $ 필수. 3. 백슬래시(\) 누락 없이 정확한 LaTeX 문법 사용. 
 JSON 배열 {size}개 생성: [{{ "question": "...", "options": ["...","...","...","...","..."], "solution": "..." }}]"""
     try:
         res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
@@ -141,27 +136,42 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
         sel = random.choice(fresh)
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB"}
-    new_batch = await generate_batch_ai(q_info, size=5)
-    if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
+    
+    # DB에 없으면 생성 (재시도 로직 포함)
+    for _ in range(2):
+        new_batch = await generate_batch_ai(q_info, size=3)
+        if new_batch:
+            return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
+        await asyncio.sleep(1)
     return {"num": q_info['num'], "question": "문제 생성 지연 중..", "options": [], "solution": "오류"}
 
 async def run_orchestrator(choice_sub, num, score_v=None):
     blueprint = get_exam_blueprint(choice_sub, num, score_v)
-    start_time = time.time()
     used_ids, used_batch_ids = set(), set()
-    
-    # [핵심] 30문항 무한 로딩 방지를 위해 5문항씩 끊어서 실행 (Chunking)
     results = []
-    chunk_size = 5
+    
+    # [핵심] image_12bd59 지연 해결: 진행 바와 함께 순차적 묶음 생성
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    chunk_size = 3 # 3개씩 끊어서 생성하여 부하 분산
     for i in range(0, len(blueprint), chunk_size):
         chunk = blueprint[i : i + chunk_size]
+        status_text.text(f"🚀 {i+1}번 ~ {min(i+chunk_size, 30)}번 문항 작업 중...")
+        
         tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in chunk]
         chunk_results = await asyncio.gather(*tasks)
         results.extend(chunk_results)
         
-        # 백그라운드 저장 트리거
+        # 백그라운드 저장
         all_new = [r['full_batch'] for r in chunk_results if r.get('source') == "AI" and "full_batch" in r]
         if all_new: safe_save_to_bank([item for sublist in all_new for item in sublist])
+        
+        progress_bar.progress(min((i + chunk_size) / len(blueprint), 1.0))
+        await asyncio.sleep(0.5) # API 부하 방지 휴식
+    
+    status_text.empty()
+    progress_bar.empty()
     
     results.sort(key=lambda x: x.get('num', 999))
     p_html, s_html = "", ""
@@ -179,7 +189,7 @@ async def run_orchestrator(choice_sub, num, score_v=None):
             s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_output(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
     
-    return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
+    return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
 # --- 7. UI 및 인증 ---
 def send_verification_email(receiver, code):
@@ -218,7 +228,7 @@ with st.sidebar:
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
 if st.session_state.v and btn:
-    with st.spinner("서버 부하 분산 및 30문항 조판 중... (분할 생성 중)"):
-        p, s, elap, hits = asyncio.run(run_orchestrator(sub_choice, num_choice, score_choice))
-        st.success(f"✅ 발간 완료! ({elap:.1f}초 | DB 사용: {hits}개)")
+    with st.spinner("최종 조판 엔진 가동 중..."):
+        p, s, hits = asyncio.run(run_orchestrator(sub_choice, num_choice, score_choice))
+        st.success(f"✅ 발간 완료! (DB 사용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
