@@ -44,7 +44,22 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 초정밀 텍스트 정제 엔진 ---
+# --- 3. [신규] 초정밀 불량품 폐기소 (Validation Shield) ---
+def is_valid_question(q, expected_type):
+    """AI가 만든 문제가 수능 규격에 100% 맞는지 검사. 하나라도 틀리면 폐기."""
+    if not q.get('question') or not str(q.get('question')).strip(): return False
+    if not q.get('solution') or not str(q.get('solution')).strip(): return False
+    
+    opts = q.get('options', [])
+    if expected_type == '객관식':
+        if not isinstance(opts, list) or len(opts) != 5: return False
+        if not all(str(o).strip() for o in opts): return False
+    else: # 주관식
+        if opts and len(opts) > 0: return False
+        
+    return True
+
+# --- 4. 텍스트 정제 엔진 ---
 def polish_output(text):
     if not text: return ""
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
@@ -62,28 +77,28 @@ def clean_option(text):
     clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
     return polish_output(clean)
 
-def safe_save_to_bank(batch):
+def safe_save_to_bank(batch, expected_type):
     def _bg_save():
         with DB_LOCK:
             for q in batch:
-                try:
-                    if not bank_db.search(QBank.question == q.get("question", "")):
-                        bank_db.insert(q)
-                except: continue
+                # 깐깐한 검사를 통과한 진짜 문제만 DB에 저장
+                if is_valid_question(q, expected_type):
+                    try:
+                        if not bank_db.search(QBank.question == q.get("question", "")):
+                            bank_db.insert(q)
+                    except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. 수능 표준 배치 설계 (비율 완벽 고정) ---
+# --- 5. 수능 표준 배치 설계 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
-        # 공통과목: 1~15 (객관식), 16~22 (주관식)
         for i in range(1, 16): 
             score = 2 if i <= 3 else 4 if i in [9,10,11,12,13,14,15] else 3
             blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식", "cat": "공통"})
         for i in range(16, 23):
             score = 4 if i in [21, 22] else 3
             blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "주관식", "cat": "공통"})
-        # 선택과목: 23~28 (객관식 6문제), 29~30 (주관식 2문제)
         for i in range(23, 29): 
             score = 2 if i == 23 else 4 if i == 28 else 3
             blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식", "cat": "선택"})
@@ -94,7 +109,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 5. HTML/CSS 템플릿 ---
+# --- 6. HTML/CSS 템플릿 ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -138,51 +153,40 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 6. [핵심] 공통 프롬프트 생성기 (오류 1, 2, 3 원천 봉쇄) ---
+# --- 7. 메인 화면용 프롬프트 ---
 def build_strict_prompt(q_info, size):
     diff_guide = ""
     if q_info['score'] == 4:
-        diff_guide = "[초고난도 변별력] (가), (나) 조건을 포함한 복합 개념 융합 출제." if q_info.get('num', 0) in [15, 22, 30] else "[고난도 4점] 복합 사고력 요구."
+        diff_guide = "[초고난도 변별력] (가), (나) 조건을 포함한 복합 개념 출제." if q_info.get('num', 0) in [15, 22, 30] else "[고난도 4점] 복합 사고력 요구."
     elif q_info['score'] == 3:
         diff_guide = "[응용 3점] 수능 3점 수준."
     else:
         diff_guide = "[기초 2점] 수능 2점 수준 기초 연산."
 
-    # [오류 3 해결] 주관식 정답 조건(3자리 이하 자연수) 강제
-    if q_info['type'] == '객관식':
-        opt_rule = "객관식이므로 options 배열에 5개의 선지를 반드시 작성할 것."
-    else:
-        opt_rule = "주관식(단답형)이므로 options 배열은 비워두고([]), 정답은 반드시 '3자리 이하의 자연수'가 되도록 출제할 것."
+    opt_rule = "객관식이므로 options 배열에 5개의 선지를 반드시 작성할 것." if q_info['type'] == '객관식' else "주관식(단답형)이므로 options 배열은 비워둘 것([])."
 
-    # [오류 1, 2 해결] 한국어 강제 및 출제 범위 엄격 제한
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
 [최우선 필수 지시사항] 
-1. 언어: 모든 문제, 선지, 해설은 반드시 **한국어**로만 작성할 것. (영어 사용 금지)
-2. 출제 범위: 반드시 '{q_info['sub']}' 교육과정 내에서만 출제할 것. (공통과목인 '수학 I, II' 출제 시 미적분/기하 개념 절대 포함 금지)
+1. 언어: 모든 문제, 해설은 반드시 한국어로 작성 (영어 금지).
+2. 범위: 반드시 '{q_info['sub']}' 교육과정 내에서만 출제.
 3. 난이도: {diff_guide}
 4. 유형: {opt_rule}
-5. 형식: 수식 $ $ 필수. 지문에 과목명, 배점, 번호 등 부가 텍스트 절대 금지.
+5. 형식: 수식 $ $ 필수. 과목명, 배점 등 부가 텍스트 절대 금지.
 JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}]"""
     return prompt
 
-# --- 7. AI 생성 엔진 ---
 async def generate_batch_ai(q_info, size=2): 
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     prompt = build_strict_prompt(q_info, size)
     
     try:
-        res = await model.generate_content_async(
-            prompt, 
-            safety_settings=SAFETY_SETTINGS, 
-            generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json")
-        )
+        res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json"))
         raw_text = res.text.strip()
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         data = json.loads(match.group(0)) if match else json.loads(raw_text)
             
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
-    except Exception as e:
-        return []
+    except: return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
     with DB_LOCK:
@@ -195,7 +199,7 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
     
     for _ in range(3):
         new_batch = await generate_batch_ai(q_info, size=2)
-        if new_batch: 
+        if new_batch and len(new_batch) > 0 and is_valid_question(new_batch[0], q_info['type']): 
             return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info.get('cat', '공통')}
         await asyncio.sleep(1.5) 
         
@@ -219,13 +223,13 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     chunk_size = 2 
     for i in range(0, len(blueprint), chunk_size):
         chunk = blueprint[i : i + chunk_size]
-        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 생성 중...")
+        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 생성 중... (철통 검수 중)")
         tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
         
         all_new = [r['full_batch'] for r in chunk_res if r.get('source') == "AI" and "full_batch" in r]
-        if all_new: safe_save_to_bank([item for sublist in all_new for item in sublist])
+        if all_new: safe_save_to_bank([item for sublist in all_new for item in sublist], chunk[0]['type'])
         prog.progress(min((i + chunk_size) / len(blueprint), 1.0))
         await asyncio.sleep(1.0)
     status.empty(); prog.empty()
@@ -276,7 +280,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
 
     return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 8. [프롬프트 일원화] 백그라운드 자동 축적 엔진 ---
+# --- 8. [신규] '1 Seed -> 3 Variants' 무결점 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -288,9 +292,17 @@ def run_auto_farmer():
                 score = random.choice([2, 3, 4])
                 q_type = random.choice(["객관식", "주관식"])
                 
-                # 메인 엔진과 100% 동일한 강력한 프롬프트 적용
-                q_info = {"sub": sub, "score": score, "type": q_type}
-                prompt = build_strict_prompt(q_info, size=2)
+                diff_guide = "[초고난도 변별력] 복합 개념 융합 출제" if score == 4 else "[응용 3점]" if score == 3 else "[기초 2점]"
+                opt_rule = "객관식이므로 options 배열에 5개의 선지 필수." if q_type == '객관식' else "주관식(단답형)이므로 options 배열 비울 것([])."
+                
+                # 사용자님의 천재적 아이디어 적용: 1개 창작 후 3개 쌍둥이 변형
+                prompt = f"""과목:{sub} | 배점:{score} | 유형:{q_type}
+[최우선 필수 지시사항] 
+1. 생성 방식: **먼저 완전히 새로운 창작 문항 1개(Seed)를 만들고, 이어서 그 문항의 숫자나 조건만 살짝 비튼 쌍둥이 유사 문항(Variant) 3개를 작성할 것.**
+2. 언어 및 범위: 무조건 한국어. 반드시 '{sub}' 교육과정 내에서 출제.
+3. 난이도 및 유형: {diff_guide} / {opt_rule}
+4. 형식: 수식 $ $ 필수. 부가 텍스트 절대 금지.
+JSON 배열 형태로 총 4개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}, ...]"""
                 
                 res = sync_model.generate_content(
                     prompt, 
@@ -303,10 +315,12 @@ def run_auto_farmer():
                     data = json.loads(match.group(0))
                     with DB_LOCK:
                         for q in data:
-                            q.update({"batch_id": str(uuid.uuid4()), "sub": sub, "score": score, "type": q_type})
-                            if not bank_db.search(QBank.question == q['question']):
-                                bank_db.insert(q)
-            time.sleep(12) 
+                            # 깐깐한 검문소 통과한 문제만 DB 진입 허가
+                            if is_valid_question(q, q_type):
+                                q.update({"batch_id": str(uuid.uuid4()), "sub": sub, "score": score, "type": q_type})
+                                if not bank_db.search(QBank.question == q['question']):
+                                    bank_db.insert(q)
+            time.sleep(15) 
         except Exception:
             time.sleep(20)
 
@@ -336,7 +350,7 @@ with st.sidebar:
         if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
             with DB_LOCK:
                 bank_db.truncate()
-            st.success("DB가 완벽히 초기화되었습니다! 이제 깨끗한 한글/범위 문제만 저장됩니다.")
+            st.success("DB가 완벽히 초기화되었습니다! 이제 깨끗한 쌍둥이 문제들로 자동 파밍됩니다.")
             st.rerun()
 
     if not st.session_state.verified:
@@ -357,11 +371,12 @@ with st.sidebar:
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
         score = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
-        with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)} / 10000")
+        
+        # 버튼을 누르거나 사이드바를 만질 때마다 숫자가 점프하는 것을 볼 수 있습니다.
+        with DB_LOCK: st.caption(f"🗄️ 무결점 DB 축적량: {len(bank_db)} / 10000")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중... (한국어/출제범위/형식 철저 검증 중)"):
+    with st.spinner("AI 엔진 가동 중... (무결점 데이터 검증 및 조판 중)"):
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
-
