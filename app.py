@@ -37,29 +37,34 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [긴급 수정] 수식 정밀 교정 엔진 (Polish Math V3) ---
+# --- 3. [긴급 수리] 수식 정밀 교정 엔진 (패턴 에러 해결 버전) ---
 def polish_math(text):
     if not text: return ""
     # 1. 불필요 메타데이터 삭제
     text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     
-    # 2. 극한 기호 정밀 치환 (image_115c01 중괄호 오류 해결)
-    # 기존에 엉킨 displaystyle이나 중괄호들을 모두 제거하고 깨끗한 기초 텍스트로 환원
-    text = text.replace(r'\displaystyle', '').replace(r'displaystyle', '')
-    text = text.replace(r'{\lim}', r'\lim').replace(r'{\lim }', r'\lim ')
+    # 2. 극한 기호 수직 정렬 교정 (image_115fc0 에러 원천 차단)
+    # 복잡한 정규식 대신 안전한 replace 방식을 사용합니다.
+    text = text.replace(r'\displaystyle', '').replace('displaystyle', '') # 기존 찌꺼기 제거
     
-    # 정석 규격으로 재조립: \lim_{x \to 0} -> \displaystyle \lim_{x \to 0}
-    # 이 방식이 MathJax에서 가장 안전하고 오류가 없습니다.
-    text = re.sub(r'\\lim\s*_{?\s*([a-zA-Z0-9\s\\to\infty]+)\s*}?', r'\\displaystyle \\lim_{\1}', text)
+    # lim 기호를 수능 규격인 \displaystyle \lim으로 치환
+    text = text.replace(r'\lim', r'\displaystyle \lim')
+    text = text.replace('lim', r'\displaystyle \lim')
     
-    # 3. 화살표 및 기타 기호 보정
+    # 3. 화살표 및 특수 기호
     text = text.replace('->', r'\to')
     text = text.replace('Σ', r'\sum').replace('∫', r'\int')
     
-    # 4. 첨자 중괄호 누락 방지 (a_n -> a_{n})
-    text = re.sub(r'([a-zA-Z])_([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1_{\2}', text)
-    text = re.sub(r'([a-zA-Z0-9])\^([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1^{\2}', text)
+    # 4. 첨자 중괄호 누락 보정 (단순 패턴 사용)
+    # log_2 -> \log_{2}
+    text = re.sub(r'log_(\d+|[a-zA-Z])', r'\\log_{\1}', text)
+    # a_n -> a_{n} / x^2 -> x^{2}
+    text = re.sub(r'([a-zA-Z])_(\d+|[a-zA-Z])', r'\1_{\2}', text)
+    text = re.sub(r'([a-zA-Z0-9])\^(\d+|[a-zA-Z])', r'\1^{\2}', text)
+    
+    # 중복된 \displaystyle 정리
+    text = text.replace(r'\displaystyle \displaystyle', r'\displaystyle')
     
     return text.strip()
 
@@ -77,7 +82,7 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. HTML 템플릿 (수식 가독성 디자인) ---
+# --- 5. HTML 템플릿 (수능 조판 규격) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -88,10 +93,8 @@ def get_html_template(p_html, s_html):
             window.MathJax = {{
                 tex: {{ 
                     inlineMath: [['$', '$']], 
-                    displayMath: [['$$', '$$']],
-                    processEscapes: true
-                }},
-                chtml: {{ scale: 1.05 }}
+                    displayMath: [['$$', '$$']]
+                }}
             }};
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
@@ -184,7 +187,7 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
     new_batch = await generate_batch_ai(q_info)
     if new_batch:
         return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    return {"num": q_info['num'], "question": "로딩 지연..", "options": [], "solution": "오류", "source": "ERROR"}
+    return {"num": q_info['num'], "question": "서버 지연 중..", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def run_orchestrator(choice_sub, num, score_val=None):
     blueprint = get_exam_blueprint(choice_sub, num, score_val)
@@ -210,6 +213,7 @@ async def run_orchestrator(choice_sub, num, score_val=None):
             if item.get('type') == '객관식' and opts:
                 spans = "".join([f"<span>{chr(9312+j)} {polish_math(clean_option(o))}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
+            
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
             s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
@@ -257,7 +261,7 @@ with st.sidebar:
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
 if st.session_state.v and 'btn' in locals() and btn:
-    with st.spinner("중괄호 오류 정밀 보정 및 시험지 조판 중..."):
+    with st.spinner("수식 정밀 레이아웃 조정 중..."):
         p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
         st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
