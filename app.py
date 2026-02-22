@@ -23,7 +23,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 (에러 방지용) ---
+# --- 2. DB 및 전역 락 ---
 @st.cache_resource
 def get_databases():
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
@@ -37,37 +37,38 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 정제 엔진 (image_10833d 문구 제거 및 수식 보정) ---
+# --- 3. [업데이트] 수식 완벽 보정 및 메타데이터 제거 엔진 ---
 def polish_math(text):
     if not text: return ""
-    # 과목/단원/배점 메타데이터 문구 완전 삭제
+    # 1. 불필요한 가이드라인 문구 완전 삭제 (image_10833d 해결)
     text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[.*?점\]$', '', text.strip())
-    # 수식 LaTeX 보정
+    
+    # 2. 부자연스러운 수식 기호 LaTeX 정규화 (image_10e876 해결)
     text = re.sub(r'log_([a-zA-Z0-9{}]+)', r'\\log_{\1}', text)
     text = re.sub(r'([a-zA-Z])_([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1_{\2}', text)
     text = re.sub(r'([a-zA-Z0-9])\^([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1^{\2}', text)
+    text = text.replace('Σ', r'\sum').replace('∫', r'\int').replace('lim', r'\lim')
     return text.strip()
 
 def clean_option(text):
-    # 선지 번호 제거 (분수 보호)
+    # 선지 번호 잘림 방지 (image_060658 해결)
     return re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
 
-# --- 4. [해결사] DB 안전 저장 함수 ---
+# --- 4. [해결사] 지연 발생 방지용 세이프 인서트 ---
 def safe_save_to_bank(batch):
-    """ValueError: Document already exists 에러(image_1091c3)를 원천 차단"""
-    with DB_LOCK:
-        for q in batch:
-            try:
-                # 1. 지문 내용으로 중복 여부 먼저 확인
-                q_text = q.get("question", "")
-                if not bank_db.search(QBank.question == q_text):
-                    bank_db.insert(q)
-            except ValueError:
-                # 2. 만약 TinyDB 내부 ID 충돌이 나더라도 프로그램을 멈추지 않고 무시
-                continue
+    """ValueError 및 지연 현상을 막기 위한 비동기 백그라운드 저장 로직"""
+    def _bg_save():
+        with DB_LOCK:
+            for q in batch:
+                try:
+                    if not bank_db.search(QBank.question == q.get("question", "")):
+                        bank_db.insert(q)
+                except: continue
+    # 메인 루프를 방해하지 않게 별도 스레드에서 저장
+    threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. 수능 블루프린트 (30문항 풀세트) ---
+# --- 5. 수능 블루프린트 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
@@ -86,7 +87,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "diff": "보통", "score": custom_score or 3, "type": "객관식", "domain": f"{choice_sub} 전범위"})
     return blueprint
 
-# --- 6. HTML 디자인 (네모 제거 및 가독성 향상) ---
+# --- 6. HTML 디자인 (네모 삭제 버전) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -105,7 +106,7 @@ def get_html_template(p_html, s_html):
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 50px; min-height: 230mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
             .question-box {{ position: relative; line-height: 2.1; font-size: 11pt; padding-left: 25px; margin-bottom: 45px; text-align: justify; }}
-            /* 문항 네모 박스 제거 */
+            /* 문항 번호 네모 박스 제거 */
             .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 12pt; }}
             .options-container {{ margin-top: 25px; display: flex; justify-content: space-between; font-size: 10.5pt; }}
             .condition-box {{ border: 1.5px solid #000; padding: 12px; margin: 15px 0; background: #fafafa; font-weight: 700; }}
@@ -117,46 +118,55 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. 비동기 엔진 ---
+# --- 7. 비동기 생성 엔진 (지수적 백오프 재시도 탑재) ---
 async def generate_batch_ai(q_info, size=5):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['domain']} | 배점:{q_info['score']}
-[규칙] 1. 수식 $ $ 필수. 분수는 $\\frac{{a}}{{b}}$. 2. 과목/단원 메타데이터 출력 금지.
+[규칙] 1. 수식 $ $ 필수. 분수는 \\frac{{a}}{{b}}. 2. 메타데이터(과목, 단원 등) 문구 출력 금지.
 오직 JSON 배열로 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
-    try:
-        res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
-        data = json.loads(res.text.strip())
-        return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "domain": q_info['domain'], "score": q_info['score'], "type": q_info['type']} for d in data]
-    except: return []
+    
+    for attempt in range(3): # 최대 3번 재시도하여 지연 발생 문구 억제
+        try:
+            res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
+            data = json.loads(res.text.strip())
+            return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "domain": q_info['domain'], "score": q_info['score'], "type": q_info['type']} for d in data]
+        except:
+            await asyncio.sleep(1)
+    return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
     with DB_LOCK:
         available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.domain == q_info['domain']) & (QBank.score == q_info['score']))
     fresh = [q for q in available if str(q.doc_id) not in used_ids and q.get('batch_id') not in used_batch_ids]
+    
     if fresh:
         sel = random.choice(fresh)
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB"}
+    
     new_batch = await generate_batch_ai(q_info)
     if new_batch:
-        return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    return {"num": q_info['num'], "question": "지연 발생.. 재시도 해주세요.", "options": [], "solution": "오류", "source": "ERROR"}
+        res = {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
+        return res
+    return {"num": q_info['num'], "question": "서버 응답 지연.. 재시도 해주세요.", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def run_orchestrator(choice_sub, num, score_val=None):
     blueprint = get_exam_blueprint(choice_sub, num, score_val)
     start_time = time.time()
     used_ids, used_batch_ids = set(), set()
+    
     tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in blueprint]
     results = await asyncio.gather(*tasks)
     results.sort(key=lambda x: x.get('num', 999))
     
-    # 생성된 문제들 안전 일괄 저장 (충돌 방지 로직)
+    # DB 저장은 백그라운드 스레드에서 조용히 처리 (image_1091c3 충돌 방지)
     all_new = []
     for r in results:
         if r.get('source') == "AI" and "full_batch" in r:
             all_new.extend(r['full_batch'])
-    safe_save_to_bank(all_new)
+    if all_new:
+        safe_save_to_bank(all_new)
     
     p_html, s_html = "", ""
     for i in range(0, len(results), 2):
@@ -170,29 +180,12 @@ async def run_orchestrator(choice_sub, num, score_val=None):
                 spans = "".join([f"<span>{chr(9312+j)} {clean_option(o)}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
-            s_html += f"<div class='sol-item'><b>{item['num']}번:</b> {polish_math(item.get('solution',''))}</div>"
+            s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
+    
     return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 8. 백그라운드 DB 파밍 ---
-def run_auto_farmer():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    while True:
-        try:
-            if len(bank_db) < 10000:
-                sub = random.choice(["수학 I, II", "미적분", "확률과 통계", "기하"])
-                q_info = {"sub": sub, "domain": f"{sub} 핵심 랜덤", "score": random.choice([2,3,4]), "type": "객관식"}
-                batch = loop.run_until_complete(generate_batch_ai(q_info, size=10))
-                safe_save_to_bank(batch)
-            time.sleep(60)
-        except: time.sleep(60)
-
-if 'farmer' not in st.session_state:
-    threading.Thread(target=run_auto_farmer, daemon=True).start()
-    st.session_state.farmer = True
-
-# --- 9. 이메일 인증 및 UI ---
+# --- 8. 이메일 인증 및 UI ---
 def send_verification_email(receiver_email, code):
     try:
         msg = MIMEMultipart()
@@ -233,10 +226,10 @@ with st.sidebar:
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
         score_v = int(st.selectbox("배점", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
-        st.caption(f"🗄️ DB 축적량: {len(bank_db)} / 10000")
+        with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)} / 10000")
 
 if st.session_state.v and 'btn' in locals() and btn:
-    with st.spinner("DB 충돌 방어 엔진 가동 중..."):
+    with st.spinner("DB 지연 방어 엔진 가동 및 정밀 렌더링 중..."):
         p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
         st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
