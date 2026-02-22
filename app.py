@@ -44,9 +44,8 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [신규] 초정밀 불량품 폐기소 (Validation Shield) ---
+# --- 3. 초정밀 불량품 폐기소 (Validation Shield) ---
 def is_valid_question(q, expected_type):
-    """AI가 만든 문제가 수능 규격에 100% 맞는지 검사. 하나라도 틀리면 폐기."""
     if not q.get('question') or not str(q.get('question')).strip(): return False
     if not q.get('solution') or not str(q.get('solution')).strip(): return False
     
@@ -54,7 +53,7 @@ def is_valid_question(q, expected_type):
     if expected_type == '객관식':
         if not isinstance(opts, list) or len(opts) != 5: return False
         if not all(str(o).strip() for o in opts): return False
-    else: # 주관식
+    else: 
         if opts and len(opts) > 0: return False
         
     return True
@@ -81,7 +80,6 @@ def safe_save_to_bank(batch, expected_type):
     def _bg_save():
         with DB_LOCK:
             for q in batch:
-                # 깐깐한 검사를 통과한 진짜 문제만 DB에 저장
                 if is_valid_question(q, expected_type):
                     try:
                         if not bank_db.search(QBank.question == q.get("question", "")):
@@ -153,7 +151,7 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. 메인 화면용 프롬프트 ---
+# --- 7. 프롬프트 및 메인 화면 엔진 ---
 def build_strict_prompt(q_info, size):
     diff_guide = ""
     if q_info['score'] == 4:
@@ -280,7 +278,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
 
     return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 8. [신규] '1 Seed -> 3 Variants' 무결점 파밍 엔진 ---
+# --- 8. 1 Seed -> 3 Variants 무결점 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -295,7 +293,6 @@ def run_auto_farmer():
                 diff_guide = "[초고난도 변별력] 복합 개념 융합 출제" if score == 4 else "[응용 3점]" if score == 3 else "[기초 2점]"
                 opt_rule = "객관식이므로 options 배열에 5개의 선지 필수." if q_type == '객관식' else "주관식(단답형)이므로 options 배열 비울 것([])."
                 
-                # 사용자님의 천재적 아이디어 적용: 1개 창작 후 3개 쌍둥이 변형
                 prompt = f"""과목:{sub} | 배점:{score} | 유형:{q_type}
 [최우선 필수 지시사항] 
 1. 생성 방식: **먼저 완전히 새로운 창작 문항 1개(Seed)를 만들고, 이어서 그 문항의 숫자나 조건만 살짝 비튼 쌍둥이 유사 문항(Variant) 3개를 작성할 것.**
@@ -315,7 +312,6 @@ JSON 배열 형태로 총 4개 생성: [{{ "question": "...", "options": [...], 
                     data = json.loads(match.group(0))
                     with DB_LOCK:
                         for q in data:
-                            # 깐깐한 검문소 통과한 문제만 DB 진입 허가
                             if is_valid_question(q, q_type):
                                 q.update({"batch_id": str(uuid.uuid4()), "sub": sub, "score": score, "type": q_type})
                                 if not bank_db.search(QBank.question == q['question']):
@@ -328,7 +324,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 9. UI 및 인증 ---
+# --- 9. [보안 수정] UI 및 권한 분리 인증 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -338,33 +334,54 @@ def send_verification_email(receiver, code):
     except: return False
 
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
-if 'verified' not in st.session_state: st.session_state.verified = False
+
+# 세션 상태 초기화 (verified: 로그인 여부, user_email: 접속자 권한 추적)
+if 'verified' not in st.session_state: 
+    st.session_state.verified = False
+    st.session_state.user_email = ""
 
 with st.sidebar:
     st.title("🎓 본부 인증")
-    email_in = st.text_input("이메일", value=ADMIN_EMAIL if st.session_state.verified else "")
     
-    if email_in == ADMIN_EMAIL: 
-        st.session_state.verified = True
-        st.success("👑 관리자 인증 완료")
-        if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
-            with DB_LOCK:
-                bank_db.truncate()
-            st.success("DB가 완벽히 초기화되었습니다! 이제 깨끗한 쌍둥이 문제들로 자동 파밍됩니다.")
-            st.rerun()
-
+    # 1. 로그인 전 화면
     if not st.session_state.verified:
-        if st.button("인증번호 발송"):
-            code = str(random.randint(100000, 999999))
-            if send_verification_email(email_in, code):
-                st.session_state.auth_code, st.session_state.mail_sent = code, True
-                st.success("발송 완료!")
-        if st.session_state.get('mail_sent'):
-            c_in = st.text_input("6자리 입력")
-            if st.button("확인"):
-                if c_in == st.session_state.auth_code: st.session_state.verified = True; st.rerun()
+        email_in = st.text_input("이메일 입력")
+        
+        # 관리자 이메일 입력 시 패스워드 없이 다이렉트 통과 (기존 로직 유지)
+        if email_in == ADMIN_EMAIL:
+            if st.button("관리자 로그인"):
+                st.session_state.verified = True
+                st.session_state.user_email = ADMIN_EMAIL
+                st.rerun()
+        else:
+            if st.button("인증번호 발송"):
+                code = str(random.randint(100000, 999999))
+                if send_verification_email(email_in, code):
+                    st.session_state.auth_code = code
+                    st.session_state.mail_sent = True
+                    st.session_state.temp_email = email_in
+                    st.success("발송 완료!")
+            if st.session_state.get('mail_sent'):
+                c_in = st.text_input("6자리 입력")
+                if st.button("확인"):
+                    if c_in == st.session_state.auth_code: 
+                        st.session_state.verified = True
+                        st.session_state.user_email = st.session_state.temp_email
+                        st.rerun()
+                        
+    # 2. 로그인 완료 후 화면
+    else:
+        st.success(f"✅ {st.session_state.user_email} 님 로그인됨")
+        
+        # [핵심 방어벽] 로그인한 계정이 관리자일 때만 초기화 버튼 노출
+        if st.session_state.user_email == ADMIN_EMAIL:
+            st.warning("👑 관리자 권한 활성화")
+            if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
+                with DB_LOCK:
+                    bank_db.truncate()
+                st.success("DB가 완벽히 초기화되었습니다! 이제 깨끗한 쌍둥이 문제들로 자동 파밍됩니다.")
+                st.rerun()
 
-    if st.session_state.verified:
         st.divider()
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
         sub = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
@@ -372,7 +389,6 @@ with st.sidebar:
         score = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
         
-        # 버튼을 누르거나 사이드바를 만질 때마다 숫자가 점프하는 것을 볼 수 있습니다.
         with DB_LOCK: st.caption(f"🗄️ 무결점 DB 축적량: {len(bank_db)} / 10000")
 
 if st.session_state.verified and btn:
@@ -380,3 +396,4 @@ if st.session_state.verified and btn:
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
+
