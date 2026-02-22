@@ -97,33 +97,30 @@ async def generate_batch_ai(q_info, size=2):
     model = genai.GenerativeModel('models/gemini-2.0-flash')
     guide = get_pro_guide(q_info['score'])
     
-    # [핵심 수정] JSON 내에서 백슬래시를 보호하기 위해 \\ 강제 사용 지시
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['topic']} | 배점:{q_info['score']}
 [절대 지시사항] 
 1. {guide}
 2. 수식 표기법: 수식은 무조건 단일 $ 기호로 감싸세요 (예: $x^2+1$). sqrt() 같은 일반 텍스트 수식은 금지합니다.
 3. [중요] JSON 이스케이프: JSON 배열 내부이므로 LaTeX 기호 사용 시 백슬래시를 반드시 두 번 쓰세요. (예: \\\\ln x, \\\\lim, \\\\frac)
 4. 도형/그래프: 꼭 필요한 경우만 `<svg>` 태그 코드를 `svg_draw`에 작성 (어려우면 null).
-5. 출력: 오직 [{{"topic": "{q_info['topic']}", "question": "...", "svg_draw": null, "options": ["①",...], "solution": "..."}}] 형태의 JSON 배열만 출력. Markdown 코드블록(```json) 금지."""
+5. 출력: 오직 [{{"topic": "{q_info['topic']}", "question": "...", "svg_draw": null, "options": ["①",...], "solution": "..."}}] 형태의 JSON 배열만 출력. Markdown 코드블록 금지."""
     
     try:
         res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.8))
-        
-        # [핵심 수정] 정규식으로 JSON 배열만 안전하게 추출
         match = re.search(r'\[.*\]', res.text.strip(), re.DOTALL)
         if not match: return []
         
         data = json.loads(match.group(0))
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": "객관식"} for d in data]
-    except Exception as e: 
+    except: 
         return []
 
-# [핵심 수정] 동적 비상 문항(Dynamic Fallback) 딕셔너리
+# 동적 비상 문항(Dynamic Fallback) 딕셔너리
 FALLBACK_BANK = {
-    ("미적분", 4): {"question": "함수 $f(x) = e^x \\sin x$ 에 대하여 구간 $[0, \\pi]$에서 곡선 $y=f(x)$ 의 변곡점의 $x$ 좌표를 $a$ 라 할 때, $\\tan a$ 의 값을 구하시오.", "options": ["-1", "0", "1", "$\\sqrt{2}$", "$\\sqrt{3}$"], "solution": "$f'(x) = e^x(\\sin x + \\cos x)$, $f''(x) = 2e^x \\cos x$ 이다. $f''(x)=0$ 에서 $\\cos x = 0$ 이므로 구간 $[0, \\pi]$ 에서 $x = \\frac{\\pi}{2}$ 이다. 좌우에서 부호가 바뀌므로 $a = \\frac{\\pi}{2}$ 이고, $\\tan(\\frac{\\pi}{2})$ 는 정의되지 않지만 극한적 상황을 묻는 의도 파악이 필요하다. (예비 문항)"},
+    ("미적분", 4): {"question": "함수 $f(x) = e^x \\sin x$ 에 대하여 구간 $[0, \\pi]$에서 곡선 $y=f(x)$ 의 변곡점의 $x$ 좌표를 $a$ 라 할 때, $\\tan a$ 의 값을 구하시오.", "options": ["-1", "0", "1", "$\\sqrt{2}$", "$\\sqrt{3}$"], "solution": "$f'(x) = e^x(\\sin x + \\cos x)$, $f''(x) = 2e^x \\cos x$ 이다. $f''(x)=0$ 에서 $\\cos x = 0$ 이므로 구간 $[0, \\pi]$ 에서 $x = \\frac{\\pi}{2}$ 이다. 변곡점의 x좌표 $a = \\frac{\\pi}{2}$ 이다. (비상 예비 문항)"},
     ("미적분", 2): {"question": "$\\lim_{x \\to 0} \\frac{e^{3x}-1}{x}$ 의 값을 구하시오.", "options": ["1", "2", "3", "4", "5"], "solution": "$\\lim_{x \\to 0} \\frac{e^{3x}-1}{3x} \\times 3 = 1 \\times 3 = 3$ 이다. 정답은 3번이다."},
-    ("기하", 4): {"question": "좌표공간에서 구 $S: x^2+y^2+z^2-2x-4y-6z+13=0$ 과 평면 $\\alpha: x+y+z=10$ 이 만나서 생기는 원의 넓이를 구하시오.", "options": ["$\\pi$", "$2\\pi$", "$3\\pi$", "$4\\pi$", "$5\\pi$"], "solution": "구의 중심 $(1, 2, 3)$, 반지름 $r=1$ 이다. 평면까지의 거리를 계산하여 피타고라스 정리를 이용한다."},
-    ("확률과 통계", 4): {"question": "주머니에 $1, 2, 3, 4, 5$가 적힌 구슬이 있다. 3개를 동시에 꺼낼 때, 적힌 수의 합이 짝수일 확률을 구하시오.", "options": ["$\\frac{2}{5}$", "$\\frac{1}{2}$", "$\\frac{3}{5}$", "$\\frac{7}{10}$", "$\\frac{4}{5}$"], "solution": "합이 짝수가 되려면 (짝짝짝) 또는 (홀홀짝) 이어야 한다. 계산하면 $\\frac{1}{2}$ 이다."},
+    ("기하", 4): {"question": "좌표공간에서 구 $S: x^2+y^2+z^2-2x-4y-6z+13=0$ 과 평면 $\\alpha: x+y+z=10$ 이 만나서 생기는 원의 넓이를 구하시오.", "options": ["$\\pi$", "$2\\pi$", "$3\\pi$", "$4\\pi$", "$5\\pi$"], "solution": "구의 중심 $(1, 2, 3)$, 반지름 $r=1$ 이다. 평면까지의 거리를 계산하여 피타고라스 정리를 이용한다. (비상 예비 문항)"},
+    ("확률과 통계", 4): {"question": "주머니에 $1, 2, 3, 4, 5$가 적힌 구슬이 있다. 3개를 동시에 꺼낼 때, 적힌 수의 합이 짝수일 확률을 구하시오.", "options": ["$\\frac{2}{5}$", "$\\frac{1}{2}$", "$\\frac{3}{5}$", "$\\frac{7}{10}$", "$\\frac{4}{5}$"], "solution": "합이 짝수가 되려면 (짝짝짝) 또는 (홀홀짝) 이어야 한다. 계산하면 $\\frac{1}{2}$ 이다. (비상 예비 문항)"},
 }
 
 async def get_safe_q(q_info, used_ids, topic_counts, total_num):
@@ -138,7 +135,6 @@ async def get_safe_q(q_info, used_ids, topic_counts, total_num):
         used_ids.add(str(sel.doc_id))
         return {**sel, "num": q_info['num'], "source": "DB"}
     
-    # AI 생성 재시도 2회
     for _ in range(2):
         new_batch = await generate_batch_ai(q_info, size=2)
         if new_batch:
@@ -146,9 +142,7 @@ async def get_safe_q(q_info, used_ids, topic_counts, total_num):
             topic_counts[sel['topic']] = topic_counts.get(sel['topic'], 0) + 1
             return {**sel, "num": q_info['num'], "source": "AI", "full_batch": new_batch}
     
-    # [핵심 수정] 과목/배점별 맞춤형 예비 문항 로드
-    fallback_data = FALLBACK_BANK.get((q_info['sub'], q_info['score']), {"question": "수식 파싱 오류 방지를 위한 예비 문항입니다. $2+3=5$", "options": ["1", "2", "3", "4", "5"], "solution": "정답은 5."})
-    
+    fallback_data = FALLBACK_BANK.get((q_info['sub'], q_info['score']), {"question": "수식 파싱 오류 방지를 위한 2점 예비 문항입니다. $2+3=5$", "options": ["1", "2", "3", "4", "5"], "solution": "정답은 5."})
     return {"num": q_info['num'], "score": q_info['score'], "question": f"[예비 문항] {fallback_data['question']}", "options": fallback_data['options'], "solution": fallback_data['solution'], "source": "SAFE", "svg_draw": None}
 
 def safe_save_to_bank(batch):
@@ -215,7 +209,7 @@ def run_auto_farmer():
                 sub = random.choice(["미적분", "확률과 통계", "기하", "수학 I", "수학 II"])
                 score = random.choice([2, 3, 4])
                 prompt = f"과목:{sub} | 배점:{score} | [지시] 기준 문항 1개와 변형 3개를 JSON으로 생성. LaTeX 기호는 이스케이프(\\\\) 처리 필수."
-                res = sync_model.generate_content(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
+                res = sync_model.generate_content(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.8))
                 
                 match = re.search(r'\[.*\]', res.text.strip(), re.DOTALL)
                 if match:
@@ -253,15 +247,34 @@ with st.sidebar:
         
         if st.session_state.user_email == ADMIN_EMAIL:
             st.warning("👑 시스템 관리")
+            
+            # --- [신규 추가] 글자 깨진 문항 스마트 청소 로직 ---
+            if st.button("🧹 수식 깨진 불량 문항 정밀 삭제"):
+                with DB_LOCK:
+                    def is_broken(doc):
+                        text = str(doc.get('question','')) + str(doc.get('solution','')) + str(doc.get('options',[]))
+                        # 8.pdf, 9.pdf에서 발견된 전형적인 수식 깨짐 패턴들
+                        bad_patterns = [r'\$', 'sqrt(', r'\backslash', 'hat{', '*{', 'Mn', '->']
+                        return any(p in text for p in bad_patterns)
+                    
+                    bad_docs = [doc.doc_id for doc in bank_db.all() if is_broken(doc)]
+                    if bad_docs:
+                        bank_db.remove(doc_ids=bad_docs)
+                        st.success(f"✅ {len(bad_docs)}개의 수식 깨짐 불량 문항이 영구 삭제되었습니다!")
+                    else:
+                        st.info("✨ 깨진 문항이 없습니다. DB가 깨끗합니다.")
+            
+            st.divider()
+
             if 'confirm_reset' not in st.session_state: st.session_state.confirm_reset = False
             
             if not st.session_state.confirm_reset:
-                if st.button("🚨 에러 난 기존 DB 강제 초기화"): st.session_state.confirm_reset = True; st.rerun()
+                if st.button("🚨 전체 DB 강제 초기화"): st.session_state.confirm_reset = True; st.rerun()
             else:
-                st.error("⚠️ 오류 데이터들을 삭제하시겠습니까?")
-                if st.button("✔️ 삭제 승인", type="primary"):
+                st.error("⚠️ 정말로 모든 문제를 삭제하시겠습니까?")
+                if st.button("✔️ 전체 삭제 승인", type="primary"):
                     with DB_LOCK: bank_db.truncate()
-                    st.session_state.confirm_reset = False; st.rerun()
+                    st.session_state.confirm_reset = False; st.success("초기화 완료!"); st.rerun()
                 if st.button("❌ 취소"): st.session_state.confirm_reset = False; st.rerun()
 
         st.divider()
