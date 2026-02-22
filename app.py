@@ -7,6 +7,7 @@ import random
 import json
 import time
 import threading
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -133,11 +134,10 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. [혁신] 창의성 스펙트럼 다중 문항 생성 로직 ---
+# --- 5. 다중 유사 문항 동시 생성 로직 ---
 sem = asyncio.Semaphore(6)
 
 async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
-    """한 번의 호출로 숫자 변형부터 창의적 변형까지 스펙트럼이 적용된 여러 문항을 반환합니다."""
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     
     if q_info['score'] == 4:
@@ -147,25 +147,29 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
         diff_instruction = "수능 2~3점 기본 응용. 계산 위주 명료하게 출제."
         sol_instruction = "수식 위주로 간결하게 작성."
 
-    type_instruction = "5지선다이므로 'options' 배열에 5개의 선지 포함." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 []."
+    # 선지 분리 및 수식 처리에 대한 초강력 지시
+    type_instruction = "5지선다 객관식입니다. 'question' 문자열 안에는 절대 ①~⑤ 선지를 쓰지 말고, 오직 'options' 배열에만 5개의 선지 내용을 분리해서 넣으세요." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 [] 로 두세요."
 
-    # 스펙트럼 프롬프트 주입
     prompt = f"""
     단원: {q_info['domain']} | 배점: {q_info['score']}점 | 유형: {q_info['type']}
     
-    [기본 규칙] 
-    1. 100% 한국어. 2. {diff_instruction} 3. {sol_instruction} 4. {type_instruction} 5. 수식은 $ $ 
+    [🚨 초강력 필수 규칙 - 위반 시 시스템 붕괴]
+    1. 100% 한국어.
+    2. 수식과 변수명(a_n, f(x) 등)은 단 하나도 빠짐없이 무조건 $ $ 로 감싸서 LaTeX 문법으로 작성하세요. (예: $a_n$, $f(x)=3x$)
+    3. {diff_instruction}
+    4. {sol_instruction}
+    5. [선지 분리 강제]: {type_instruction} "question" 텍스트 안에는 절대 ①, ②, ③, ④, ⑤ 기호를 적지 마세요!
     
     [💡 창의적 스펙트럼 특별 지시]
-    단순히 숫자만 바꾸지 마세요. {q_info['domain']} 개념을 유지하되, 다음 비율로 스펙트럼을 넓혀서 {batch_size}개의 독립적인 문항을 만드세요:
-    - 3개: [기본 변형] 원본과 유사하게 숫자, 함수식, 부호 정도만 가볍게 변경
+    단순히 숫자만 바꾸지 말고, {q_info['domain']} 개념을 유지하되 다음 비율로 {batch_size}개의 독립적인 문항을 만드세요:
+    - 3개: [기본 변형] 원본과 유사하게 숫자, 함수식 정도만 변경
     - 4개: [응용 변형] 구하는 대상을 역으로 묻거나, 질문 방식을 비틀어서 제시
-    - 3개: [창의적 변형] 실생활 활용, 완전히 낯선 도형 조건, 또는 새로운 상황을 가정한 창의적이고 참신한 형태
+    - 3개: [창의적 변형] 새로운 상황을 가정한 창의적이고 참신한 형태
     
     오직 아래 JSON 배열(Array) 형식만 반환:
     [
         {{
-            "question": "(문제 1 텍스트)",
+            "question": "(문제 텍스트만! 선지 기호 절대 금지)",
             "options": ["답1", "답2", "답3", "답4", "답5"],
             "solution": "(해설 및 정답 1)"
         }},
@@ -179,7 +183,7 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
             try:
                 res = await model.generate_content_async(
                     prompt, 
-                    generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json") # 다양성을 위해 온도 0.85로 상향
+                    generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json")
                 )
                 text = res.text.strip()
                 if text.startswith("```json"): text = text[7:]
@@ -189,10 +193,15 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
                 data_list = json.loads(text.strip())
                 parsed_questions = []
                 for data in data_list:
+                    # 파이썬 안전장치: AI가 기어코 question 안에 ①을 넣었다면 강제로 잘라냄
+                    q_text = data.get("question", "오류")
+                    if "①" in q_text:
+                        q_text = q_text.split("①")[0].strip()
+                    
                     parsed_questions.append({
                         "sub": q_info['sub'], "diff": q_info['diff'], 
                         "score": q_info['score'], "type": q_info['type'], "domain": q_info['domain'],
-                        "question": data.get("question", "오류"), 
+                        "question": q_text, 
                         "options": data.get("options", []),
                         "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
                     })
@@ -214,7 +223,6 @@ async def get_or_generate_question(q_info, used_ids):
             "solution": selected['solution'], "source": "DB"
         }
     
-    # DB에 없으면 스펙트럼 적용된 10문항을 한 번에 뽑아옴
     new_qs = await generate_batch_ai_qs(q_info, batch_size=10)
     if new_qs:
         first_q = new_qs[0]
@@ -245,6 +253,7 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
         for item in pair:
             opts = item.get('options', [])
             if opts and len(opts) >= 5:
+                # 5지선다 좌우 균등 배열
                 opt_html = f"<div class='options-container'><span>① {opts[0]}</span><span>② {opts[1]}</span><span>③ {opts[2]}</span><span>④ {opts[3]}</span><span>⑤ {opts[4]}</span></div>"
             else:
                 opt_html = ""
@@ -257,7 +266,7 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
     db_hits = sum(1 for r in results if r.get('source') == 'DB')
     return pages_html, sol_html, time.time() - start_time, db_hits
 
-# --- 백그라운드 스펙트럼 DB 무한 생성 스레드 ---
+# --- 백그라운드 무한 생성 스레드 ---
 def run_auto_farmer():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -273,13 +282,12 @@ async def auto_farm_loop():
                 q_type = random.choice(["객관식", "단답형"]) if score > 2 else "객관식"
                 
                 q_info = {"sub": sub, "diff": diff, "score": score, "type": q_type, "domain": f"{sub} 핵심 랜덤"}
-                # 한 번에 10개씩 스펙트럼 생성
                 batch_qs = await generate_batch_ai_qs(q_info, batch_size=10, retry=1)
                 
                 for q in batch_qs:
                     bank_db.insert(q)
                     
-            await asyncio.sleep(20) # 20초마다 10문제씩 쾌속 적립
+            await asyncio.sleep(20) 
         except Exception:
             await asyncio.sleep(20)
 
@@ -343,7 +351,6 @@ with st.sidebar:
                 with st.spinner("DB에 스펙트럼 100문제를 순식간에 비축 중입니다..."):
                     async def stock_db():
                         q_info = {"sub": choice_sub, "diff": "어려움", "score": 4, "type": "객관식", "domain": f"{choice_sub} 핵심"}
-                        # 10번 호출 x 배치 10 = 100문제 생성
                         tasks = [generate_batch_ai_qs(q_info, batch_size=10) for _ in range(10)]
                         res = await asyncio.gather(*tasks)
                         for batch in res:
