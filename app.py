@@ -55,7 +55,6 @@ def check_user_limit(email):
 def get_exam_blueprint(choice_subject, total_num):
     blueprint = []
     if total_num == 30:
-        # 공통과목 (1~22번)
         for i in range(1, 23):
             if i <= 2: score = 2; diff = "쉬움"
             elif i <= 8: score = 3; diff = "보통"
@@ -64,7 +63,6 @@ def get_exam_blueprint(choice_subject, total_num):
             q_type = "객관식" if i <= 15 else "단답형(주관식)"
             blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": q_type})
             
-        # 선택과목 (23~30번)
         for i in range(23, 31):
             if i <= 24: score = 2; diff = "쉬움"
             elif i <= 27: score = 3; diff = "보통"
@@ -109,9 +107,12 @@ def get_html_template(subject, pages_html, solutions_html):
             .header {{ text-align: center; border-bottom: 2.5px solid #000; padding-bottom: 12px; margin-bottom: 35px; }}
             .header h1 {{ font-weight: 800; font-size: 26pt; margin: 0; letter-spacing: -1.5px; }}
             .header h3 {{ font-weight: 700; font-size: 14pt; margin-top: 10px; }}
+            
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; min-height: 220mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            .question-box {{ position: relative; line-height: 2.0; font-size: 11pt; padding-left: 36px; margin-bottom: 45px; text-align: justify; }}
+            
+            /* 문제 박스 강제 정렬 보호 (레이아웃 파괴 방지) */
+            .question-box {{ position: relative; line-height: 2.0; font-size: 11pt; padding-left: 36px; margin-bottom: 45px; text-align: justify; word-break: break-all; }}
             .q-num {{ position: absolute; left: 0; top: 4px; font-weight: 800; border: 2px solid #000; width: 25px; height: 25px; text-align: center; line-height: 23px; font-size: 11.5pt; background: #fff; }}
             .q-score {{ font-weight: 700; font-size: 10.5pt; margin-left: 5px; }}
             .options-container {{ margin-top: 15px; font-size: 10.5pt; }}
@@ -139,37 +140,46 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. 안전한 병렬 생성 로직 (빈 화면 방지) ---
+# --- 5. 에러 방지 & 속도 향상 병렬 로직 ---
 def fetch_paged_question(q_info):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     
-    type_instruction = "①, ②, ③, ④, ⑤ 기호를 사용해 5지선다형으로 출제." if q_info['type'] == "객관식" else "단답형(정답은 3자리 이하 자연수)으로 출제."
+    type_instruction = "①~⑤ 기호로 5지선다 선지 포함." if q_info['type'] == "객관식" else "선지 없는 단답형(정답은 3자리 이하 자연수)."
     
+    # 레이아웃 파괴 및 영어 사용 원천 차단 프롬프트
     prompt = f"""
     과목:{q_info['sub']} | 번호:{q_info['num']}번 | 난이도:{q_info['diff']} | 배점:{q_info['score']}점 | 유형:{q_info['type']}
-    지시: {type_instruction}
-    주의: 인사말 절대 금지. 수식은 $ $ 로 감쌀 것. 반드시 아래 [출력형식]을 그대로 지킬 것.
+    
+    [필수 규칙 - 위반 시 시스템 에러 발생]
+    1. 100% 한국어로만 작성 ("The final answer is" 등 영어 절대 금지. 해설 정답은 "정답: 3" 형태로 표기).
+    2. HTML 구조 보호: 임의로 <div>, <p>, <table>, <br> 태그를 문제 내용 중간에 절대 추가하지 마세요. (그리드 레이아웃 깨짐 방지)
+    3. 수식은 반드시 $ $ 로 감쌀 것.
+    4. {type_instruction}
     
     [출력형식]
-    [문항] <div class='question-box'><span class='q-num'>{q_info['num']}</span> 문제내용... <span class='q-score'>[{q_info['score']}점]</span><div class='options-container'>선지</div></div> ---SPLIT--- [해설] <div class='sol-item'><b>{q_info['num']}번 해설:</b> 풀이...</div>
+    [문항] <div class='question-box'><span class='q-num'>{q_info['num']}</span> (여기에 문제 내용 한 문단으로 이어서 작성) <span class='q-score'>[{q_info['score']}점]</span><div class='options-container'>(선지)</div></div> ---SPLIT--- [해설] <div class='sol-item'><b>{q_info['num']}번 해설:</b> (여기에 풀이 작성)</div>
     """
     
     try:
-        # 글자 수 제한(max_output_tokens)을 제거하여 중간에 끊기는 문제 해결
         response = model.generate_content(
             prompt,
             generation_config=genai.types.GenerationConfig(temperature=0.7)
         )
-        return response.text.replace("```html", "").replace("```", "").strip()
+        
+        # 영어 사용 이중 안전장치 (Python 단에서 한번 더 필터링)
+        raw_text = response.text.replace("```html", "").replace("```", "").strip()
+        raw_text = raw_text.replace("The final answer is", "정답은")
+        return raw_text
+
     except Exception as e: 
-        # API 오류 발생 시에도 빈 화면이 나오지 않도록 기본 구조 반환
-        return f"[문항] <div class='question-box'><span class='q-num'>{q_info['num']}</span> 생성 중 오류가 발생했습니다. 재시도해 주세요.</div> ---SPLIT--- [해설] <div class='sol-item'><b>{q_info['num']}번 해설:</b> 오류</div>"
+        return f"[문항] <div class='question-box'><span class='q-num'>{q_info['num']}</span> 생성 중 오류 발생</div> ---SPLIT--- [해설] <div class='sol-item'><b>{q_info['num']}번 해설:</b> 오류</div>"
 
 def generate_exam(choice_subject, total_num):
     blueprint = get_exam_blueprint(choice_subject, total_num)
     start_time = time.time()
     
-    with concurrent.futures.ThreadPoolExecutor(max_workers=35) as executor:
+    # 요청하신 대로 AI 워커 100명 풀가동! (대기열 병목 완전 해소)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=100) as executor:
         results = list(executor.map(fetch_paged_question, blueprint))
     
     results.sort(key=lambda x: int(x.split('q-num\'>')[1].split('</span>')[0]) if 'q-num\'>' in x else 999)
@@ -178,13 +188,12 @@ def generate_exam(choice_subject, total_num):
         pair = results[i:i+2]
         q_content = ""
         for item in pair:
-            # 안전장치: AI가 ---SPLIT--- 태그를 빼먹었을 경우 생략하지 않고 원문을 그대로 출력
             if "---SPLIT---" in item:
                 parts = item.split("---SPLIT---")
                 q_content += parts[0].replace("[문항]", "")
                 sol_html += parts[1].replace("[해설]", "")
             else:
-                q_content += f"<div class='question-box'><span class='q-num'>!</span> 형식 오류 (SPLIT 누락):<br>{item[:150]}...</div>"
+                q_content += f"<div class='question-box'><span class='q-num'>!</span> 렌더링 오류 (SPLIT 누락)</div>"
         
         pages_html += f"""
         <div class="paper">
@@ -236,7 +245,7 @@ with st.sidebar:
         choice_sub = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
         num = 30 if mode == "30문항 풀세트 발간" else st.slider("문항 수", 2, 10, 4, step=2)
         
-        generate_btn = st.button("🚀 안정적 고속 발간 시작", use_container_width=True)
+        generate_btn = st.button("🚀 초고속 시험지 발간 시작", use_container_width=True)
 
 # 메인 화면 영역
 if st.session_state.verified:
@@ -245,7 +254,7 @@ if st.session_state.verified:
         st.info(f"📊 이용 가능 횟수: {remain} | 선택과목: {choice_sub}")
         
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"AI 코어 35개가 동시에 가동 중입니다 (목표 속도 약 60~70초)..."):
+            with st.spinner(f"⚡ AI 코어 100개를 풀가동하여 문항을 렌더링 중입니다 (최대한 60초 이내로 단축 중)..."):
                 p, s, elapsed = generate_exam(choice_sub, num)
                 
                 st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초)")
