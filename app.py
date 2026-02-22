@@ -85,7 +85,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 5. HTML/CSS 템플릿 (수능 조판 완벽 유지) ---
+# --- 5. HTML/CSS 템플릿 (레이아웃 완벽 조판) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -131,14 +131,13 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 6. [오류 100% 해결] AI 엔진 및 JSON 파서 ---
+# --- 6. AI 생성 엔진 ---
 async def generate_batch_ai(q_info, size=2): 
-    # 사용자님이 원하시던 gemini-2.5-flash 모델 원상 복구
-    model = genai.GenerativeModel('models/gemini-2.5-flash')
+    model = genai.GenerativeModel('gemini-1.5-flash')
     
     diff_guide = ""
     if q_info['score'] == 4:
-        if q_info['num'] in [15, 22, 30]:
+        if q_info.get('num', 0) in [15, 22, 30]:
             diff_guide = "[최고난도 킬러 문항] (가), (나) 조건을 제시하고 복합 개념 융합 출제."
         else:
             diff_guide = "[준킬러 4점] 복합 사고력 요구."
@@ -159,7 +158,6 @@ JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution
     try:
         res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json"))
         
-        # [핵심 해결] AI가 마크다운 기호를 섞어 보내도 JSON 파싱 에러가 나지 않도록 텍스트 강제 정제
         raw_text = res.text.strip()
         if raw_text.startswith("```json"):
             raw_text = raw_text[7:]
@@ -168,8 +166,7 @@ JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution
             
         data = json.loads(raw_text.strip())
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
-    except Exception as e:
-        print(f"API 에러 발생: {e}") # 백그라운드 확인용
+    except Exception:
         return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
@@ -181,12 +178,11 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB", "cat": q_info.get('cat', '공통')}
     
-    # 생성 재시도 로직 (429 에러 방어)
     for _ in range(3):
         new_batch = await generate_batch_ai(q_info, size=2)
         if new_batch: 
             return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info.get('cat', '공통')}
-        await asyncio.sleep(2.0) # 요청 과부하를 막기 위해 휴식 시간 증가
+        await asyncio.sleep(1.5) 
         
     return {
         "num": q_info.get('num', 0), 
@@ -266,7 +262,39 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
 
     return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 7. UI 및 인증 ---
+# --- 7. [복구 완료] 백그라운드 DB 가속 파밍 엔진 ---
+def run_auto_farmer():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    while True:
+        try:
+            with DB_LOCK:
+                cur_len = len(bank_db)
+            if cur_len < 10000:
+                sub = random.choice(["수학 I, II", "미적분", "확률과 통계", "기하"])
+                score = random.choice([2, 3, 4])
+                q_type = random.choice(["객관식", "주관식"])
+                q_info = {"sub": sub, "score": score, "type": q_type}
+                
+                # API 부하 방지를 위해 3개씩만 천천히 파밍
+                batch = loop.run_until_complete(generate_batch_ai(q_info, size=3))
+                if batch:
+                    with DB_LOCK:
+                        for q in batch:
+                            if not bank_db.search(QBank.question == q['question']):
+                                bank_db.insert(q)
+            # 10초마다 지속적으로 백그라운드 축적
+            time.sleep(10)
+        except Exception:
+            # 에러 발생 시 20초 휴식 후 재가동
+            time.sleep(20)
+
+# 앱 실행 시 파머 스레드 최초 1회 가동
+if 'farmer_running' not in st.session_state:
+    threading.Thread(target=run_auto_farmer, daemon=True).start()
+    st.session_state.farmer_running = True
+
+# --- 8. UI 및 인증 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -309,11 +337,13 @@ with st.sidebar:
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
         score = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
+        # 파밍 엔진이 작동하면서 올라가는 DB 축적량 실시간 표시
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)} / 10000")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중... (Gemini-2.5-Flash 정상 호출 중)"):
+    with st.spinner("AI 엔진 가동 중... (Gemini-1.5-Flash 정상 호출 중)"):
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
+
 
