@@ -31,7 +31,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 (자가 치유 로직) ---
+# --- 2. DB 및 전역 락 ---
 @st.cache_resource
 def get_databases():
     try:
@@ -53,17 +53,16 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 초정밀 텍스트 정제 엔진 (글자 깨짐 방지) ---
+# --- 3. 텍스트 정제 엔진 (수식 및 벡터 최적화) ---
 def polish_output(text):
     if not text: return ""
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     text = re.sub(r'^Step\s?\d:.*?\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[.*?점\]\s*', '', text)
     
-    # 주요 수학 함수 자동 백슬래시 보정 로직
     math_tokens = [
         'sin', 'cos', 'tan', 'log', 'ln', 'lim', 'exp', 'sqrt', 'vec', 'cdot', 
-        'frac', 'theta', 'pi', 'infty', 'to', 'sum', 'int', 'alpha', 'beta'
+        'frac', 'theta', 'pi', 'infty', 'to', 'sum', 'int', 'alpha', 'beta', 'mu', 'sigma'
     ]
     for token in math_tokens:
         text = re.sub(rf'(?<!\\)\b{token}\b', rf'\\{token}', text)
@@ -75,7 +74,7 @@ def clean_option(text):
     clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
     return polish_output(clean)
 
-# --- 4. 무결점 검수 엔진 ---
+# --- 4. 무결점 검수 ---
 def is_valid_question(q, expected_type):
     if not q.get('topic') or not str(q.get('topic')).strip(): return False
     if not q.get('question') or not str(q.get('question')).strip(): return False
@@ -98,7 +97,7 @@ def safe_save_to_bank(batch, expected_type):
                     except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. 2026 수능 비율형 블루프린트 설계 ---
+# --- 5. 수능 표준 블루프린트 설계 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     m1_topics = ["지수함수와 로그함수", "삼각함수", "수열"]
@@ -133,7 +132,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "topic": topic, "score": custom_score or 3, "type": "객관식"})
     return blueprint
 
-# --- 6. HTML 템플릿 (선지 열 이탈 방지 & MathJax 고정) ---
+# --- 6. HTML 템플릿 (선지 정렬 보강) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -153,7 +152,7 @@ def get_html_template(p_html, s_html):
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
             .question-box {{ position: relative; line-height: 2.6; font-size: 11.5pt; padding-left: 30px; margin-bottom: 60px; text-align: justify; }}
             .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 14pt; }}
-            .options-container {{ margin-top: 30px; display: flex; flex-wrap: wrap; gap: 15px 5px; font-size: 11pt; }}
+            .options-container {{ margin-top: 30px; display: flex; flex-wrap: wrap; gap: 10px 5px; font-size: 11pt; }}
             .options-container span {{ flex: 0 0 18%; min-width: 145px; white-space: nowrap; }}
             .solution-paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-top: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }}
             @media print {{ .no-print {{ display: none; }} body {{ padding: 0; }} .paper, .solution-paper {{ box-shadow: none; margin: 0; }} }}
@@ -168,7 +167,7 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. 창의성 룰렛 (루즈함 방지) ---
+# --- 7. 창의성 룰렛 ---
 def get_universal_twist(sub, score):
     if sub == "확률과 통계": return random.choice(["🚫 주머니 금지", "📊 실생활 통계", "🧩 조건 추론"])
     elif sub == "미적분": return random.choice(["📈 초월함수 그래프 추론", "📐 급수 기하 활용", "🔄 치환/부분적분 응용"])
@@ -211,7 +210,6 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, total_num):
         topic_counts[sel.get('topic', '기타')] = topic_counts.get(sel.get('topic', '기타'), 0) + 1
         return {**sel, "num": q_info['num'], "source": "AI", "full_batch": new_batch}
     
-    # [핵심 수정] AttributeError 방지를 위해 반드시 source 키 포함
     return {"num": q_info.get('num', 0), "score": 3, "type": "객관식", "question": "서버 응답 지연", "options": ["-", "-", "-", "-", "-"], "solution": "오류", "source": "ERROR"}
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
@@ -283,7 +281,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 10. UI & 관리자 메뉴 (선택적 초기화 기능) ---
+# --- 10. UI & 인증 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 if 'verified' not in st.session_state: st.session_state.verified, st.session_state.user_email = False, ""
 
@@ -296,29 +294,28 @@ with st.sidebar:
     else:
         st.success(f"✅ {st.session_state.user_email}")
         if st.button("🚪 로그아웃"): st.session_state.verified = False; st.rerun()
-        
-        if st.session_state.user_email == ADMIN_EMAIL:
-            st.warning("👑 관리자 전용")
-            if st.button("🧹 미적분 DB만 초기화"):
-                with DB_LOCK: bank_db.remove(QBank.sub == "미적분")
-                st.success("미적분 DB 초기화 완료!"); st.rerun()
-            if st.button("🚨 전체 DB 초기화"):
-                with DB_LOCK: bank_db.truncate()
-                st.success("전체 초기화 완료!"); st.rerun()
+        if st.session_state.user_email == ADMIN_EMAIL and st.button("🚨 전체 DB 초기화"):
+             with DB_LOCK: bank_db.truncate(); st.rerun()
 
         st.divider()
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
         sub = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 10, step=2)
-        score_val = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
+        
+        # [복구 성공] 난이도 설정 슬롯
+        score_val = None
+        if mode == "맞춤 문항":
+            score_val = int(st.selectbox("난이도 설정 (배점)", ["2", "3", "4"]))
+            
         btn = st.button("🚀 발간 시작", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ 무결점 DB: {len(bank_db)}")
 
 if st.session_state.verified and btn:
-    with st.spinner("비율 최적화 및 수식 검수 중..."):
+    with st.spinner("비율 최적화 조판 중..."):
         try:
             html_out, hits = asyncio.run(run_orchestrator(sub, num, score_val))
             st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
             st.components.v1.html(html_out, height=1200, scrolling=True)
         except Exception as e:
             st.error(f"❌ 발간 중 오류 발생: {e}")
+
