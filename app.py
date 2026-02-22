@@ -53,14 +53,13 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [개선] 기하/벡터 특화 텍스트 정제 엔진 ---
+# --- 3. 텍스트 정제 엔진 (벡터/기하 최적화) ---
 def polish_output(text):
     if not text: return ""
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     text = re.sub(r'^Step\s?\d:.*?\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[.*?점\]\s*', '', text)
     
-    # 벡터 및 특수 기호 보호 (백슬래시 보정)
     math_tokens = [
         'vec', 'cdot', 'frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 
         'to', 'infty', 'sin', 'cos', 'tan', 'sum', 'int', 'alpha', 'beta', 'mu', 'sigma'
@@ -75,7 +74,7 @@ def clean_option(text):
     clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
     return polish_output(clean)
 
-# --- 4. 무결점 검수 및 저장 ---
+# --- 4. 무결점 검수 엔진 ---
 def is_valid_question(q, expected_type):
     if not q.get('topic') or not str(q.get('topic')).strip(): return False
     if not q.get('question') or not str(q.get('question')).strip(): return False
@@ -118,7 +117,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 6. [해결] HTML/CSS 템플릿 (재귀 에러 제거) ---
+# --- 6. HTML/CSS 템플릿 ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -126,12 +125,7 @@ def get_html_template(p_html, s_html):
     <head>
         <meta charset="utf-8">
         <script>
-            window.MathJax = {{
-                tex: {{
-                    inlineMath: [['$', '$']],
-                    displayMath: [['$$', '$$']]
-                }}
-            }};
+            window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }} }};
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <style>
@@ -166,38 +160,23 @@ def get_html_template(p_html, s_html):
 # --- 7. 다이내믹 창의성 룰렛 ---
 def get_creative_twist(sub, score):
     if sub == "확률과 통계":
-        return random.choice([
-            "🚫 금지: '주머니/공/상자' 상황 절대 사용 금지.",
-            "🎨 시각화: 확률분포표 또는 정규분포 곡선 그래프를 반드시 해석하는 문제.",
-            "📊 실생활: 기후 데이터, 투표 결과 등 실제 통계 상황 설정.",
-            "🧩 조건: (가), (나) 조건을 활용한 함수의 개수 추론 유형."
-        ])
+        return random.choice(["🚫 주머니 금지", "📊 실생활 통계", "🧩 조건 추론"])
     if sub == "기하":
-        return random.choice([
-            "📐 벡터: 내적의 최댓값/최솟값 또는 벡터의 연산 성질을 묻는 참신한 유형.",
-            "🔄 이차곡선: 타원/포물선의 정의를 이용한 기하학적 추론.",
-            "📍 공간: 평면의 방정식이나 공간도형의 위치 관계."
-        ])
-    return "[기초/응용] 수능 표준 유형 및 복합 개념 융합."
+        return random.choice(["📐 벡터 내적", "🔄 이차곡선 정의", "📍 공간도형"])
+    return "[기초/응용] 표준 유형 융합."
 
 # --- 8. 프롬프트 및 메인 엔진 ---
 def build_strict_prompt(q_info, size):
     creative_twist = get_creative_twist(q_info['sub'], q_info['score'])
-    opt_rule = "객관식: options 5개 필수." if q_info['type'] == '객관식' else "주관식: options 비움([]), 정답 3자리 자연수."
+    opt_rule = "객관식: 5개 선지." if q_info['type'] == '객관식' else "주관식: options 비움."
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
-[지시사항]
-1. 한국어 전용. 범위 준수.
-2. 창의성/다양성: {creative_twist}
-3. 유형: {opt_rule}
-4. 형식: 수식 $ $ 필수. 벡터는 \\vec{{a}} 형식 엄수.
-JSON 배열 {size}개 생성: [{{ "topic": "...", "question": "...", "options": [...], "solution": "..." }}]"""
+[지시] 1.한국어 2.창의성: {creative_twist} 3.벡터는 \\vec{{a}} 형식 4.JSON 배열 {size}개 생성."""
     return prompt
 
 async def generate_batch_ai(q_info, size=2): 
     model = genai.GenerativeModel('models/gemini-2.5-flash')
-    prompt = build_strict_prompt(q_info, size)
     try:
-        res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
+        res = await model.generate_content_async(build_strict_prompt(q_info, size), safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
         data = json.loads(re.search(r'\[.*\]', res.text.strip(), re.DOTALL).group(0))
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
     except: return []
@@ -218,11 +197,8 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts):
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB+"}
     
-    for _ in range(3):
-        new_batch = await generate_batch_ai(q_info, size=2)
-        if new_batch and len(new_batch) > 0 and is_valid_question(new_batch[0], q_info['type']):
-            return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-        await asyncio.sleep(1.2) 
+    new_batch = await generate_batch_ai(q_info, size=2)
+    if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
     return {"num": q_info.get('num', 0), "score": 3, "type": "객관식", "question": "지연 발생", "options": [], "solution": "오류"}
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
@@ -232,15 +208,12 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     for i in range(0, len(blueprint), 2):
         chunk = blueprint[i : i + 2]
-        status.text(f"⏳ {i+1}번 ~ {min(i+2, 30)}번 정밀 조판 중...")
         tasks = [get_safe_q(q, used_ids, used_batch_ids, topic_counts) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
         all_new = [r['full_batch'] for r in chunk_res if r.get('source') == "AI" and "full_batch" in r]
         if all_new: safe_save_to_bank([item for sublist in all_new for item in sublist], chunk[0]['type'])
         prog.progress(min((i + 2) / len(blueprint), 1.0))
-        await asyncio.sleep(0.8)
-    status.empty(); prog.empty()
     
     results.sort(key=lambda x: x.get('num', 999))
     p_html, s_html = "" , ""
@@ -270,7 +243,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     return get_html_template(p_html, s_html), sum(1 for r in results if r.get('source').startswith('DB'))
 
-# --- 8. 백그라운드 파밍 엔진 ---
+# --- 9. 백그라운드 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -279,8 +252,7 @@ def run_auto_farmer():
             if cur_len < 10000:
                 sub = random.choice(["수학 I, II", "미적분", "확률과 통계", "기하"])
                 score, q_type = random.choice([2, 3, 4]), random.choice(["객관식", "주관식"])
-                prompt = build_strict_prompt({"sub": sub, "score": score, "type": q_type}, size=4)
-                res = sync_model.generate_content(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
+                res = sync_model.generate_content(build_strict_prompt({"sub": sub, "score": score, "type": q_type}, size=4), safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
                 data = json.loads(re.search(r'\[.*\]', res.text.strip(), re.DOTALL).group(0))
                 with DB_LOCK:
                     for q in data:
@@ -294,7 +266,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 9. UI 및 보안 로그아웃 ---
+# --- 10. UI 및 [신규] 기하(벡터) 선택적 초기화 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 if 'verified' not in st.session_state: st.session_state.verified, st.session_state.user_email = False, ""
 
@@ -304,31 +276,45 @@ with st.sidebar:
         email_in = st.text_input("이메일 입력")
         if email_in == ADMIN_EMAIL:
             if st.button("관리자 로그인"): st.session_state.verified, st.session_state.user_email = True, ADMIN_EMAIL; st.rerun()
-        else:
-            if st.button("인증번호 발송"):
-                # (메일 발송 코드 생략)
-                st.session_state.auth_code, st.session_state.mail_sent, st.session_state.temp_email = "123456", True, email_in; st.success("발송됨")
-            if st.session_state.get('mail_sent'):
-                c_in = st.text_input("6자리 입력")
-                if st.button("확인"):
-                    if c_in == st.session_state.auth_code: st.session_state.verified, st.session_state.user_email = True, st.session_state.temp_email; st.rerun()
     else:
         st.success(f"✅ {st.session_state.user_email}")
         if st.button("🚪 로그아웃"): st.session_state.verified = False; st.rerun()
+        
         if st.session_state.user_email == ADMIN_EMAIL:
-            if st.button("🚨 DB 완전 초기화"):
-                with DB_LOCK: bank_db.truncate()
-                st.success("초기화됨"); st.rerun()
+            st.warning("👑 관리자 권한")
+            
+            # 1. 전체 초기화 (기존 유지)
+            if st.button("🚨 전체 DB 초기화"): st.session_state.confirm_all = True
+            if st.session_state.get('confirm_all'):
+                if st.button("✔️ 전체 삭제 승인", type="primary"):
+                    with DB_LOCK: bank_db.truncate()
+                    st.session_state.confirm_all = False; st.rerun()
+                if st.button("❌ 취소", key="c_all"): st.session_state.confirm_all = False; st.rerun()
+            
+            # 2. [신규] 기하(벡터) 문제만 골라 초기화
+            st.divider()
+            if st.button("📐 기하(벡터) 문제만 초기화"): st.session_state.confirm_vec = True
+            if st.session_state.get('confirm_vec'):
+                st.error("⚠️ '기하' 과목 문제만 모두 삭제하시겠습니까?")
+                if st.button("✔️ 기하 삭제 승인", type="primary"):
+                    with DB_LOCK:
+                        # [핵심] TinyDB의 remove를 사용하여 '기하' 과목만 삭제
+                        bank_db.remove(QBank.sub == "기하")
+                    st.session_state.confirm_vec = False
+                    st.success("기하 문제 초기화 완료!")
+                    st.rerun()
+                if st.button("❌ 취소", key="c_vec"): st.session_state.confirm_vec = False; st.rerun()
+
         st.divider()
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
         sub = st.selectbox("선택과목", ["확률과 통계", "미적분", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 10, step=2)
-        score = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ 무결점 DB: {len(bank_db)}")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 및 벡터 수식 검수 중..."):
-        html_out, hits = asyncio.run(run_orchestrator(sub, num, score))
+    with st.spinner("AI 엔진 가동 중..."):
+        html_out, hits = asyncio.run(run_orchestrator(sub, num))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(html_out, height=1200, scrolling=True)
+
