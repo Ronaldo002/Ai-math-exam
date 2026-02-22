@@ -2,19 +2,19 @@ import streamlit as st
 import google.generativeai as genai
 from tinydb import TinyDB, Query
 from datetime import datetime
-import time
+import concurrent.futures # 병렬 처리를 위한 라이브러리
 
-# --- 1. 환경 설정 및 보안 ---
+# --- 1. 환경 설정 ---
 if "PAID_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["PAID_API_KEY"])
 else:
-    st.error("Streamlit Secrets에 PAID_API_KEY를 등록해주세요!")
+    st.error("Secrets에 PAID_API_KEY를 등록해주세요!")
     st.stop()
 
 db = TinyDB('service_data.json')
 User = Query()
 
-# --- 2. 시험지 HTML/CSS 템플릿 (수식 및 PDF 최적화) ---
+# --- 2. 최적화된 HTML 템플릿 (글자 깨짐 방지 및 2단 레이아웃) ---
 def get_html_template(subject, questions_html, solutions_html):
     return f"""
     <!DOCTYPE html>
@@ -27,12 +27,15 @@ def get_html_template(subject, questions_html, solutions_html):
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Noto+Serif+KR:wght@400;700&display=swap');
             body {{ font-family: 'Noto Serif KR', serif; background: #f0f2f6; padding: 20px; }}
-            .paper {{ background: white; width: 210mm; margin: 0 auto; padding: 20mm; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 297mm; color: #000; }}
-            .header {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 30px; }}
-            .question {{ margin-bottom: 40px; line-height: 1.8; font-size: 1.1em; text-align: left; }}
-            .q-num {{ font-weight: bold; margin-right: 10px; font-size: 1.2em; }}
-            .sol-section {{ page-break-before: always; border-top: 3px double #000; padding-top: 40px; margin-top: 50px; text-align: left; }}
-            .btn-download {{ position: fixed; top: 20px; right: 20px; padding: 12px 24px; background: #ff4b4b; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; z-index: 1000; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }}
+            .paper {{ background: white; width: 210mm; margin: 0 auto; padding: 15mm; box-shadow: 0 0 10px rgba(0,0,0,0.1); min-height: 297mm; color: #000; overflow: hidden; }}
+            .header {{ text-align: center; border-bottom: 2px solid #000; padding-bottom: 10px; margin-bottom: 20px; }}
+            /* 킬러 문항용 2단 배열 및 페이지 조절 */
+            .question-container {{ display: flex; flex-wrap: wrap; gap: 20px; }}
+            .question {{ width: 45%; margin-bottom: 60px; line-height: 1.8; font-size: 1.05em; page-break-inside: avoid; }}
+            .q-num {{ font-weight: bold; margin-right: 10px; font-size: 1.2em; border: 1px solid #000; padding: 2px 8px; }}
+            .sol-section {{ page-break-before: always; border-top: 3px double #000; padding-top: 40px; margin-top: 50px; }}
+            .sol-item {{ margin-bottom: 30px; padding: 15px; background: #f9f9f9; border-radius: 5px; }}
+            .btn-download {{ position: fixed; top: 20px; right: 20px; padding: 12px 24px; background: #ff4b4b; color: white; border: none; border-radius: 8px; cursor: pointer; font-weight: bold; z-index: 1000; }}
         </style>
     </head>
     <body>
@@ -42,7 +45,9 @@ def get_html_template(subject, questions_html, solutions_html):
                 <h1>2026학년도 대학수학능력시험 모의평가</h1>
                 <h3>수학 영역 ({subject})</h3>
             </div>
-            <div class="content">{questions_html}</div>
+            <div class="question-container">
+                {questions_html}
+            </div>
             <div class="sol-section">
                 <h2 style="text-align:center;">[정답 및 해설]</h2>
                 {solutions_html}
@@ -51,14 +56,7 @@ def get_html_template(subject, questions_html, solutions_html):
         <script>
             function downloadPDF() {{
                 const element = document.getElementById('exam-paper');
-                const opt = {{
-                    margin: 10,
-                    filename: '2026_수능_수학_모의고사.pdf',
-                    image: {{ type: 'jpeg', quality: 0.98 }},
-                    html2canvas: {{ scale: 2, useCORS: true }},
-                    jsPDF: {{ unit: 'mm', format: 'a4', orientation: 'portrait' }}
-                }};
-                html2pdf().set(opt).from(element).save();
+                html2pdf().set({{ margin: 10, filename: '2026_수능_수학.pdf', html2canvas: {{ scale: 2 }}, jsPDF: {{ format: 'a4' }} }}).from(element).save();
             }}
             window.MathJax && MathJax.typesetPromise();
         </script>
@@ -66,87 +64,50 @@ def get_html_template(subject, questions_html, solutions_html):
     </html>
     """
 
-# --- 3. 핵심 로직 함수 ---
-def check_user_access(email):
-    today = datetime.now().strftime("%Y-%m-%d")
-    user = db.table('users').get(User.email == email)
-    if not user:
-        db.table('users').insert({'email': email, 'count': 0, 'last_date': today})
-        return True, 5
-    if user['last_date'] != today:
-        db.table('users').update({'count': 0, 'last_date': today}, User.email == email)
-        return True, 5
-    remaining = 5 - user['count']
-    return (remaining > 0), remaining
-
-def generate_exam(subject, difficulty, count, email):
-    # [핵심수정] 진단 결과(image_f61d5e)에서 확인된 가용 모델 중 최신형인 2.5 flash를 사용합니다.
+# --- 3. 병렬 생성을 위한 함수 ---
+def fetch_single_question(i, subject, difficulty):
+    # 진단 결과에서 확인된 최신 모델 사용
     model = genai.GenerativeModel('models/gemini-2.5-flash')
-    
-    q_html_list, s_html_list = [], []
-    
-    # 진행률 UI 설정
-    progress_bar = st.progress(0)
-    percent_text = st.empty()
-    status_text = st.empty()
-    
-    for i in range(1, count + 1):
-        percent_val = int((i / count) * 100)
-        status_text.markdown(f"✍️ **{i}번 문항** 생성 및 검수 중...")
-        percent_text.markdown(f"📊 **진행률: {percent_val}%**")
-        
-        prompt = f"""
-        수능 수학 {subject} {difficulty} 난이도 {i}번 문항을 출제하세요.
-        반드시 [문항] ... ---SPLIT--- [해설] ... 형식을 지키고 인사말은 생략하세요.
-        수식은 반드시 $ 기호를 사용한 LaTeX로 작성하세요.
-        """
-        
-        try:
-            response = model.generate_content(prompt)
-            raw_text = response.text.replace("```html", "").replace("```", "").strip()
-            
-            if "---SPLIT---" in raw_text:
-                parts = raw_text.split("---SPLIT---")
-                q_html_list.append(parts[0].replace("[문항]", "").strip())
-                s_html_list.append(parts[1].replace("[해설]", "").strip())
-            else:
-                q_html_list.append(f"<div class='question'><span class='q-num'>{i}.</span>{raw_text}</div>")
-            
-            progress_bar.progress(i / count)
-            time.sleep(0.5)
-            
-        except Exception as e:
-            st.error(f"{i}번 생성 에러: {e}")
-            continue
-            
-    status_text.success(f"✅ {count}문항 발간이 완료되었습니다!")
-    percent_text.empty()
-    
-    user_data = db.table('users').get(User.email == email)
-    db.table('users').update({'count': user_data['count'] + 1}, User.email == email)
-    
-    return get_html_template(subject, "".join(q_html_list), "".join(s_html_list))
+    prompt = f"""
+    수능 수학 {subject} {difficulty} 난이도 {i}번 문항을 출제하라. 
+    형식: [문항] <div class='question'><span class='q-num'>{i}</span> 문제내용...</div> ---SPLIT--- [해설] <div class='sol-item'><b>{i}번 해설:</b> 풀이내용...</div>
+    주의: 수식은 반드시 $...$ 를 사용하고 글자가 겹치지 않게 깔끔한 HTML로 출력하라.
+    """
+    try:
+        response = model.generate_content(prompt)
+        return response.text.replace("```html", "").replace("```", "").strip()
+    except:
+        return f"Error in {i}"
 
-# --- 4. UI 구성 ---
-st.set_page_config(page_title="Premium 수능 수학 생성기", layout="wide")
+def generate_parallel(subject, difficulty, count):
+    # ThreadPoolExecutor를 사용하여 여러 명의 AI가 동시에 작업하는 효과를 냅니다.
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(fetch_single_question, i, subject, difficulty) for i in range(1, count + 1)]
+        results = [f.result() for f in concurrent.futures.as_completed(futures)]
+    
+    q_list, s_list = [], []
+    for res in sorted(results): # 번호순 정렬
+        if "---SPLIT---" in res:
+            p = res.split("---SPLIT---")
+            q_list.append(p[0].replace("[문항]", "").strip())
+            s_list.append(p[1].replace("[해설]", "").strip())
+    return "".join(q_list), "".join(s_list)
+
+# --- 4. UI ---
+st.set_page_config(page_title="Ultra Premium 수능 수학", layout="wide")
 
 with st.sidebar:
-    st.title("🎓 Premium 모드")
-    email = st.text_input("사용자 이메일 주소", placeholder="user@example.com")
-    st.divider()
-    num = st.slider("발간 문항 수", 1, 30, 5)
-    sub = st.selectbox("과목 선택", ["수학 I, II", "미적분", "확률과 통계"])
-    diff = st.select_slider("난이도 설정", options=["표준", "준킬러", "킬러"])
-    st.info("유료 엔진 최적화 및 진행률 표시 기능이 활성화되었습니다.")
+    st.title("🎓 Ultra Premium")
+    email = st.text_input("사용자 이메일")
+    num = st.slider("문항 수", 1, 30, 5)
+    sub = st.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
+    diff = st.select_slider("난이도", options=["표준", "준킬러", "킬러"])
 
 if email:
-    is_active, left = check_user_access(email)
-    if is_active:
-        st.write(f"✅ 인증 성공! (오늘 남은 횟수: {left}회)")
-        if st.button("🚀 프리미엄 시험지 발간"):
-            final_html = generate_exam(sub, diff, num, email)
+    if st.button("🚀 초고속 병렬 발간 시작"):
+        with st.spinner(f"AI 군단이 {num}문항을 동시에 제작 중입니다..."):
+            q_html, s_html = generate_parallel(sub, diff, num)
+            final_html = get_html_template(sub, q_html, s_html)
             st.components.v1.html(final_html, height=1200, scrolling=True)
-    else:
-        st.error("오늘의 생성 한도를 초과했습니다.")
 else:
-    st.info("사이드바에 이메일을 입력하면 프리미엄 엔진이 활성화됩니다.")
+    st.info("이메일 입력 후 시작하세요.")
