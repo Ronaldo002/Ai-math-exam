@@ -67,6 +67,7 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             elif i in [20, 21]: score = 4; diff = "준킬러(고난도)"; domain = "정적분으로 정의된 함수 / 그래프 추론"
             elif i == 22: score = 4; diff = "초고난도(최종 킬러)"; domain = "다항함수의 추론과 미분"
             else: score = 3; diff = "보통"; domain = "수학 I, II"
+            
             q_type = "객관식" if i <= 15 else "단답형"
             blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": q_type, "domain": domain})
             
@@ -76,6 +77,7 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             elif i in [28, 29]: score = 4; diff = "준킬러(고난도)"; domain = f"{choice_subject} 심화 응용"
             elif i == 30: score = 4; diff = "초고난도(최종 킬러)"; domain = f"{choice_subject} 최고난도 융합 추론"
             else: score = 3; diff = "보통"; domain = choice_subject
+            
             q_type = "객관식" if i <= 28 else "단답형"
             blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": q_type, "domain": domain})
     else:
@@ -132,29 +134,24 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. [핵심 복구] 과거 DB 데이터 자동 정제 로직 ---
+# --- 5. 문항 텍스트 정제 필터 (DB 오류 방어) ---
 def process_question_data(item):
-    """DB에 잘못 들어간 구버전 데이터(선지 미분리)를 감지하고 실시간으로 쪼개주는 자동 복구 함수"""
     q_text = item.get("question", "")
     opts = item.get("options", [])
     
-    # 1. 만약 과거 데이터라서 options 배열이 비어있는데, 텍스트 안에 '①'이 들어있다면? (복구 작업 진행)
     if not opts and "①" in q_text:
         parts = q_text.split("①")
-        q_text = parts[0].strip() # 순수 문제 텍스트
-        raw_opts = "①" + parts[1] # 선지 덩어리
-        
-        # 정규식을 통해 ①~⑤를 분리하여 options 배열 생성
+        q_text = parts[0].strip()
+        raw_opts = "①" + parts[1]
         found_opts = re.split(r'[①②③④⑤]', raw_opts)
         opts = [opt.strip() for opt in found_opts if opt.strip()][:5]
         
-    # 2. 만약 AI가 새롭게 생성한 데이터인데, 하지 말라는데도 문제 안에 '①'을 썼다면? (강제 절단)
     elif opts and "①" in q_text:
         q_text = q_text.split("①")[0].strip()
         
     return q_text, opts
 
-# --- 6. AI 생성 로직 (수식/선지 규격화 초강력 프롬프트) ---
+# --- 6. 창의성 스펙트럼 다중 문항 생성 로직 ---
 sem = asyncio.Semaphore(6)
 
 async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
@@ -169,13 +166,15 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
 
     type_instruction = "5지선다 객관식입니다. 'question' 텍스트 안에는 절대 ①~⑤ 선지를 쓰지 말고, 오직 'options' 배열에만 5개의 선지를 분리해서 넣으세요." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 [] 로 두세요."
 
+    # 수식 포맷팅 강력 제어 (조건 박스 내부 수식 누락 방지 포함)
     prompt = f"""
     단원: {q_info['domain']} | 배점: {q_info['score']}점 | 유형: {q_info['type']}
     
     [🚨 초강력 필수 규칙 - 위반 시 에러 발생]
     1. 100% 한국어.
-    2. [수식 완벽 규격화]: 모든 변수명과 수식은 무조건 $ $ 로 감싸서 정식 LaTeX 문법을 사용할 것. 
-       - 로그: 무조건 `\\log_{{a}}{{x}}` (밑은 반드시 _{{}} 처리. 그냥 log_2 금지)
+    2. [수식 완벽 규격화]: 모든 변수명과 수식은 예외 없이 $ $ 로 감싸서 정식 LaTeX 문법을 사용할 것. 
+       - 특히 (가), (나) 조건 박스 안의 적분(\int), 시그마(\sum) 등 모든 수학 기호도 반드시 $ $ 안에 넣을 것!
+       - 로그: 무조건 `\\log_{{a}}{{x}}` (밑은 반드시 _{{}} 처리)
        - 수열 및 지수: 무조건 `a_{{n+1}}`, `2^{{x-1}}` 처럼 첨자에 중괄호 {{}} 필수.
     3. {diff_instruction}
     4. {sol_instruction}
@@ -261,22 +260,20 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
         pair = results[i:i+2]
         q_content = ""
         for item in pair:
-            # 방금 만든 Auto-Repair 함수 통과
             q_text, opts = process_question_data(item)
             
-            # 객관식일 경우 무조건 선지 렌더링 시도
             if item.get('type') == '객관식':
                 if opts and len(opts) >= 1:
                     spans = []
                     for idx, opt in enumerate(opts[:5]):
-                        # 기존의 숫자 찌꺼기 완벽 제거
-                        clean_opt = re.sub(r'^[①②③④⑤\d][\.\)]?\s*', '', str(opt)).strip()
+                        # [버그 수정됨] 오직 ①~⑤ 기호나 "1.", "2)" 형태만 정밀하게 타격하여 삭제하고, 진짜 숫자 정답(0, 195 등)은 살립니다!
+                        clean_opt = re.sub(r'^([①②③④⑤]|[1-5][\.\)])\s*', '', str(opt)).strip()
                         spans.append(f"<span>{chr(9312+idx)} {clean_opt}</span>")
                     opt_html = f"<div class='options-container'>{''.join(spans)}</div>"
                 else:
                     opt_html = "<div class='options-container'><span>선지 오류</span></div>"
             else:
-                opt_html = "" # 단답형
+                opt_html = ""
             
             q_content += f"<div class='question-box'><span class='q-num'>{item['num']}</span> {q_text} <span class='q-score'>[{item['score']}점]</span>{opt_html}</div>"
             sol_html += f"<div class='sol-item'><b>{item['num']}번 해설:</b> {item['solution']}</div>"
