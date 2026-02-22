@@ -37,34 +37,29 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [완전 해결] 수식 정밀 교정 엔진 ---
+# --- 3. [긴급 수정] 수식 정밀 교정 엔진 (Polish Math V3) ---
 def polish_math(text):
     if not text: return ""
-    # 불필요 메타데이터 삭제
+    # 1. 불필요 메타데이터 삭제
     text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     
-    # [핵심] image_110628 오류 해결: 백슬래시 2개를 사용하여 정식 LaTeX 명령어로 전달
-    # 모든 lim 기호를 수직 정렬 모드로 변환
-    text = text.replace(r'\lim', r'{\displaystyle \lim}')
-    text = text.replace(r'lim', r'{\displaystyle \lim}')
+    # 2. 극한 기호 정밀 치환 (image_115c01 중괄호 오류 해결)
+    # 기존에 엉킨 displaystyle이나 중괄호들을 모두 제거하고 깨끗한 기초 텍스트로 환원
+    text = text.replace(r'\displaystyle', '').replace(r'displaystyle', '')
+    text = text.replace(r'{\lim}', r'\lim').replace(r'{\lim }', r'\lim ')
     
-    # -> 기호를 \to로 변환하여 극한 표시 완성
+    # 정석 규격으로 재조립: \lim_{x \to 0} -> \displaystyle \lim_{x \to 0}
+    # 이 방식이 MathJax에서 가장 안전하고 오류가 없습니다.
+    text = re.sub(r'\\lim\s*_{?\s*([a-zA-Z0-9\s\\to\infty]+)\s*}?', r'\\displaystyle \\lim_{\1}', text)
+    
+    # 3. 화살표 및 기타 기호 보정
     text = text.replace('->', r'\to')
-    
-    # 일반 수식 기호 보정 (이미 변환된 것은 건너뜀)
-    if r'\log' not in text:
-        text = re.sub(r'log_([a-zA-Z0-9{}]+)', r'\\log_{\1}', text)
-    
-    # 첨자 처리 (수열, 지수 등)
-    text = re.sub(r'([a-zA-Z])_([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1_{\2}', text)
-    text = re.sub(r'([a-zA-Z0-9])\^([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1^{\2}', text)
-    
-    # 시그마 및 적분 기호
     text = text.replace('Σ', r'\sum').replace('∫', r'\int')
     
-    # 중복 적용된 중괄호 정리
-    text = text.replace(r'{\displaystyle {\displaystyle', r'{\displaystyle')
+    # 4. 첨자 중괄호 누락 방지 (a_n -> a_{n})
+    text = re.sub(r'([a-zA-Z])_([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1_{\2}', text)
+    text = re.sub(r'([a-zA-Z0-9])\^([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1^{\2}', text)
     
     return text.strip()
 
@@ -82,7 +77,7 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. HTML 템플릿 (수식 가독성 극대화) ---
+# --- 5. HTML 템플릿 (수식 가독성 디자인) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -110,7 +105,6 @@ def get_html_template(p_html, s_html):
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; min-height: 230mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
             
-            /* 극한 기호를 위해 줄 간격 확보 */
             .question-box {{ 
                 position: relative; 
                 line-height: 2.8; 
@@ -121,7 +115,6 @@ def get_html_template(p_html, s_html):
             }}
             .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 12pt; }}
             
-            /* 선지 자동 정렬 */
             .options-container {{ 
                 margin-top: 35px; 
                 display: flex; 
@@ -138,7 +131,6 @@ def get_html_template(p_html, s_html):
             .condition-box {{ border: 1.5px solid #000; padding: 12px; margin: 15px 0; background: #fafafa; font-weight: 700; }}
             .sol-item {{ margin-bottom: 35px; border-bottom: 1px dashed #eee; padding-bottom: 15px; }}
             
-            /* 극한 기호 수직 정렬 여백 */
             mjx-container {{ margin: 0 2px !important; display: inline-block; vertical-align: middle; }}
             mjx-container[display="true"] {{ margin: 15px 0 !important; display: block; }}
         </style>
@@ -147,7 +139,7 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 6. AI 생성 및 엔진 ---
+# --- 6. 엔진 로직 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
@@ -170,9 +162,7 @@ async def generate_batch_ai(q_info, size=5):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['domain']} | 배점:{q_info['score']}
-[규칙] 1. 수식 $ $ 필수. 분수 \\frac{{a}}{{b}}, 극한 \\lim_{{x \\to 0}} 형태 엄수.
-2. 모든 수식은 LaTeX 표준 문법을 지킬 것.
-3. JSON 배열로 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
+[규칙] 1. 수식 $ $ 필수. 분수 \\frac{{a}}{{b}}, 극한 \\lim_{{x \\to 0}} 형태 엄수. 2. 오직 JSON 배열로 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
     
     for attempt in range(2):
         try:
@@ -194,7 +184,7 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
     new_batch = await generate_batch_ai(q_info)
     if new_batch:
         return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    return {"num": q_info['num'], "question": "서버 로딩 중..", "options": [], "solution": "오류", "source": "ERROR"}
+    return {"num": q_info['num'], "question": "로딩 지연..", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def run_orchestrator(choice_sub, num, score_val=None):
     blueprint = get_exam_blueprint(choice_sub, num, score_val)
@@ -220,11 +210,9 @@ async def run_orchestrator(choice_sub, num, score_val=None):
             if item.get('type') == '객관식' and opts:
                 spans = "".join([f"<span>{chr(9312+j)} {polish_math(clean_option(o))}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
-            
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
             s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
-    
     return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
 
 # --- 7. UI ---
@@ -269,7 +257,7 @@ with st.sidebar:
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
 if st.session_state.v and 'btn' in locals() and btn:
-    with st.spinner("수식 정밀 레이아웃 조정 중..."):
+    with st.spinner("중괄호 오류 정밀 보정 및 시험지 조판 중..."):
         p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
         st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
