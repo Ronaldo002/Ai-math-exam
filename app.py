@@ -1,85 +1,72 @@
 import streamlit as st
 import google.generativeai as genai
+from tinydb import TinyDB, Query
+from datetime import datetime
 import time
 
-# 1. 모델 설정 (404 방지를 위해 순수 명칭 사용)
-MODEL_NAME = 'gemini-2.0-flash'
+# --- 초기 설정 ---
+db = TinyDB('exam_service_db.json')
+Exam = Query()
+User = Query()
 
-st.set_page_config(page_title="2026 수능 수학 고속 마스터", page_icon="⚡", layout="wide")
-
-# [HTML_TEMPLATE 디자인 부분은 기존의 완성된 버전을 유지합니다]
-
-# 2. 고속 생성 엔진 (가변 지연 시간 적용)
-def generate_fast_exam(subject, total, diff, user_key):
-    all_qs = ""
-    all_sols = ""
-    progress_bar = st.progress(0)
-    status_msg = st.empty()
+# 1. 사용자 인증 및 일일 제한 확인
+def check_user_limit(user_id):
+    today = datetime.now().strftime("%Y-%m-%d")
+    user_data = db.table('users').get(User.id == user_id)
     
-    # 키 설정: 입력된 새 키를 1순위로 사용
-    api_key = user_key if user_key and len(user_key) > 20 else st.secrets["API_KEYS"][0]
-    genai.configure(api_key=api_key)
+    if not user_data:
+        db.table('users').insert({'id': user_id, 'count': 0, 'last_date': today})
+        return True, 0
     
-    # 새 키일 경우 기본 대기 시간을 1.5초로 단축 (기존 4초에서 대폭 개선)
-    base_delay = 1.5 if user_key else 3.0
+    if user_data['last_date'] != today:
+        db.table('users').update({'count': 0, 'last_date': today}, User.id == user_id)
+        return True, 0
     
-    i = 1
-    while i <= total:
-        try:
-            model = genai.GenerativeModel(MODEL_NAME)
-            status_msg.info(f"⚡ {i}번 문항 고속 생성 중... (모델: {MODEL_NAME})")
-            
-            # 프롬프트 최적화: 답변 속도를 높이기 위해 형식을 더 명확히 지시
-            prompt = f"""
-            수능 수학 {subject} {i}번 {diff} 문항 제작.
-            인사말 없이 HTML <div class='question'>과 [해설시작] 뒤 <div class='sol-card'> 형식으로만 출력.
-            수식은 $ 기호 사용, 백슬래시는 2개(\\\\)씩 입력.
-            """
-            
-            response = model.generate_content(prompt)
-            text = response.text.replace('```html', '').replace('```', '').strip()
-            
-            if "[해설시작]" in text:
-                q, s = text.split("[해설시작]", 1)
-                all_qs += q.strip()
-                all_sols += s.strip()
-                i += 1
-                progress_bar.progress(min((i-1)/total, 1.0))
-                
-                # 성공 시 짧은 휴식 후 바로 다음 문항
-                time.sleep(base_delay)
-            else:
-                time.sleep(1) # 형식 오류 시 살짝 쉬고 재시도
-                continue
-                
-        except Exception as e:
-            if "429" in str(e):
-                status_msg.warning("⚠️ 한도 감지! 안전을 위해 10초간 엔진을 냉각합니다...")
-                time.sleep(10) # 한도 초과 시 긴 휴식 후 재시도
-                base_delay += 0.5 # 이후 속도를 조금 늦춤
-                continue
-            else:
-                st.error(f"오류 발생: {e}")
-                break
-                
-    return all_qs, all_sols
+    if user_data['count'] >= 5: # 하루 5회 제한
+        return False, user_data['count']
+    return True, user_data['count']
 
-# 3. 사이드바 및 UI
-with st.sidebar:
-    st.title("⚡ 고속 생성 컨트롤러")
-    # 새로 발급받으신 API 키를 여기에 입력하세요!
-    user_api_key = st.text_input("🔑 새 API Key 입력", value="", type="password")
-    st.divider()
-    sub_opt = st.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
-    num_opt = st.radio("문항 수", [5, 10, 30], index=0)
-    diff_opt = st.select_slider("난이도", options=["표준", "준킬러", "킬러"], value="킬러")
+# 2. 메인 생성 로직 (캐싱 포함)
+def get_exam(subject, diff, user_id):
+    # 캐시 확인
+    cached = db.table('exams').search((Exam.subject == subject) & (Exam.diff == diff))
+    if cached:
+        # 30% 확률로 새로운 문제를 생성하고, 아니면 캐시된 것 중 랜덤 반환 (비용 절감)
+        st.info("📦 최적화된 보관함에서 문제를 가져왔습니다.")
+        return cached[0]['content']
 
-if st.sidebar.button("🚀 고속 발간 시작"):
-    with st.status("🔮 새로운 배럭 가동 중...") as status:
-        qs, sols = generate_fast_exam(sub_opt, num_opt, diff_opt, user_api_key)
-        if qs:
-            # HTML_TEMPLATE에 데이터 채우기 (기존 디자인 유지)
-            # final_html = HTML_TEMPLATE.format(subject=sub_opt, questions=qs, solutions=sols)
-            # st.components.v1.html(final_html, height=1200, scrolling=True)
-            st.success("✅ 고속 생성이 완료되었습니다!")
-        status.update(label="발간 완료", state="complete")
+    # 캐시 없으면 유료 API 호출
+    genai.configure(api_key=st.secrets["PAID_API_KEY"])
+    model = genai.GenerativeModel('gemini-2.0-flash')
+    
+    with st.spinner("🚀 AI가 고난도 문항을 설계 중입니다..."):
+        prompt = f"수능 수학 {subject} {diff} 문항과 해설을 HTML로 제작하라."
+        response = model.generate_content(prompt)
+        content = response.text
+        
+        # DB에 저장 (캐싱)
+        db.table('exams').insert({'subject': subject, 'diff': diff, 'content': content, 'date': str(datetime.now())})
+        # 사용자 카운트 증가
+        current_count = db.table('users').get(User.id == user_id)['count']
+        db.table('users').update({'count': current_count + 1}, User.id == user_id)
+        
+        return content
+
+# --- UI 레이아웃 ---
+st.title("⚡ 2026 수능 수학 킬러 마스터")
+
+user_id = st.text_input("ID(이메일)를 입력하세요", placeholder="user@example.com")
+
+if user_id:
+    can_gen, count = check_user_limit(user_id)
+    st.write(f"📊 오늘 남은 생성 횟수: {5 - count}회")
+    
+    if can_gen:
+        sub = st.selectbox("과목", ["수학 I, II", "미적분", "확률과 통계"])
+        df = st.select_slider("난이도", options=["표준", "준킬러", "킬러"])
+        
+        if st.button("🚀 모의고사 발간"):
+            result = get_exam(sub, df, user_id)
+            st.components.v1.html(result, height=800, scrolling=True)
+    else:
+        st.error("🚫 오늘 할당량을 모두 사용하셨습니다. 내일 다시 만나요!")
