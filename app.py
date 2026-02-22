@@ -37,18 +37,20 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. [1번 해결] 수식 보정 엔진 ---
+# --- 3. 정제 엔진 (수식 및 사족 완벽 제거) ---
 def polish_output(text):
     if not text: return ""
-    # 불필요한 메타데이터 기본 제거
-    text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    # 불필요한 메타데이터 제거 (Step, 과목, 단원 등)
+    text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^Step\s?\d:.*?\n', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\[.*?점\]\s*', '', text)
     
-    # 백슬래시가 빠진 수학 기호 강제 복구 (단어 단위 매칭으로 오작동 방지)
+    # 백슬래시 누락 복구 (정규식 단어 경계 \b 사용으로 안전성 확보)
     math_tokens = ['frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 'to', 'infty', 'sin', 'cos', 'tan', 'sum', 'int', 'alpha', 'beta']
     for token in math_tokens:
         text = re.sub(rf'(?<!\\)\b{token}\b', rf'\\{token}', text)
         
-    text = text.replace('->', r'\to')
+    text = text.replace('^', '^').replace('->', r'\to')
     return text.strip()
 
 def clean_option(text):
@@ -65,7 +67,7 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. [2번 해결] 수능 표준 배치 및 난이도 설계 ---
+# --- 4. 수능 표준 배치 및 난이도 설계 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
@@ -85,7 +87,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 5. [4번 고정] HTML 템플릿 (1페이지 2문제) ---
+# --- 5. HTML 템플릿 (1페이지 2문제 고정) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -118,14 +120,20 @@ def get_html_template(p_html, s_html):
     <body>
         <div class="no-print"><button class="btn-download" onclick="window.print()">🖨️ PDF 다운로드 / 인쇄</button></div>
         <div class="paper-container">{p_html}<div class="solution-paper"><h2 style="text-align:center;">[정답 및 해설]</h2>{s_html}</div></div>
+        <script>
+            document.addEventListener("DOMContentLoaded", function() {{
+                const content = document.body.innerHTML;
+                document.body.innerHTML = content.replace(/\\\\lim/g, "\\\\displaystyle \\\\lim").replace(/->/g, "\\\\to");
+            }});
+        </script>
     </body>
     </html>
     """
 
-# --- 6. [2번 해결] AI 생성 및 무결점 DB 조회 엔진 ---
+# --- 6. AI 생성 및 DB 조회 (객관/주관 매칭 + 에러 방어) ---
 async def generate_batch_ai(q_info, size=3):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
-    # 객관식/주관식 프롬프트 완벽 분리
+    # 객관식/주관식 프롬프트 분리
     if q_info['type'] == '객관식':
         opt_rule = "반드시 options 배열에 5개의 선지 내용을 채워 넣을 것."
     else:
@@ -141,7 +149,7 @@ JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
     with DB_LOCK:
-        # [핵심 버그 픽스] DB 검색 시 반드시 'type(객관/주관)'을 일치시켜 가져오도록 쿼리 수정
+        # DB에서 과목, 배점, 유형(객/주)이 모두 일치하는 것만 가져옴
         available = bank_db.search(
             (QBank.sub == q_info['sub']) & 
             (QBank.score == q_info['score']) & 
@@ -154,8 +162,20 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
         return {**sel, "num": q_info['num'], "source": "DB", "cat": q_info.get('cat', '공통')}
     
     new_batch = await generate_batch_ai(q_info)
-    if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info.get('cat', '공통')}
-    return {"num": q_info['num'], "question": "생성 지연..", "options": [], "solution": "오류", "type": q_info['type'], "cat": q_info.get('cat', '공통')}
+    if new_batch: 
+        return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info.get('cat', '공통')}
+    
+    # [해결] KeyError: 'score' 원인 픽스! 모든 키값을 명시적으로 반환합니다.
+    return {
+        "num": q_info.get('num', 0), 
+        "score": q_info.get('score', 3), # 이 부분이 누락되어서 에러가 발생했었습니다.
+        "type": q_info.get('type', '객관식'),
+        "cat": q_info.get('cat', '공통'),
+        "question": "서버 응답 지연으로 생성되지 않았습니다.", 
+        "options": [], 
+        "solution": "오류", 
+        "source": "ERROR"
+    }
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     blueprint = get_exam_blueprint(sub_choice, num_choice, score_choice)
@@ -181,30 +201,34 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     common_rendered = False
     select_rendered = False
 
-    # [4번 고정] 무조건 2문제씩 끊어서 한 페이지(paper)에 렌더링
+    # 2문제씩 1페이지에 조판 (좌우 1단씩)
     for i in range(0, len(results), 2):
         pair = results[i:i+2]
         q_chunk = ""
         for item in pair:
+            # 안전하게 데이터 가져오기 (.get 사용으로 완벽한 에러 방어)
+            num_val = item.get('num', '')
+            score_val = item.get('score', 3)
+            q_type = item.get('type', '객관식')
+            opts = item.get("options", [])
+            q_text = polish_output(item.get("question", ""))
+
             header_label = ""
-            if item['num'] == 1 and not common_rendered:
+            if num_val == 1 and not common_rendered:
                 header_label = "<div class='cat-header'>■ 공통과목 (수학 I, 수학 II)</div>"
                 common_rendered = True
-            elif item['num'] == 23 and not select_rendered:
+            elif num_val == 23 and not select_rendered:
                 header_label = f"<div class='cat-header'>■ 선택과목 ({sub_choice})</div>"
                 select_rendered = True
-
-            q_text = polish_output(item.get("question", ""))
-            opts = item.get("options", [])
             
             # 주관식 배열에 쓰레기값이 들어와도 무시하도록 강제 처리
             opt_html = ""
-            if item.get('type') == '객관식' and opts and len(opts) >= 1:
+            if q_type == '객관식' and opts and len(opts) >= 1:
                 spans = "".join([f"<span>{chr(9312+j)} {clean_option(o)}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
 
-            q_chunk += f"{header_label}<div class='question-box'><span class='q-num'>{item['num']}</span> {q_text} <b>[{item['score']}점]</b>{opt_html}</div>"
-            s_html += f"<div class='sol-item'><b>{item['num']}번:</b> {polish_output(item.get('solution',''))}</div>"
+            q_chunk += f"{header_label}<div class='question-box'><span class='q-num'>{num_val}</span> {q_text} <b>[{score_val}점]</b>{opt_html}</div>"
+            s_html += f"<div class='sol-item'><b>{num_val}번:</b> {polish_output(item.get('solution',''))}</div>"
         
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가 (수학 영역)</h1></div><div class='question-grid'>{q_chunk}</div></div>"
 
@@ -240,7 +264,7 @@ with st.sidebar:
     if st.session_state.verified:
         st.divider()
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
-        sub = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
+        sub = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
         score = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
@@ -251,3 +275,4 @@ if st.session_state.verified and btn:
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
+
