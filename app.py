@@ -7,6 +7,7 @@ import random
 import json
 import time
 import threading
+import re
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -66,7 +67,6 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             elif i in [20, 21]: score = 4; diff = "준킬러(고난도)"; domain = "정적분으로 정의된 함수 / 그래프 추론"
             elif i == 22: score = 4; diff = "초고난도(최종 킬러)"; domain = "다항함수의 추론과 미분"
             else: score = 3; diff = "보통"; domain = "수학 I, II"
-            
             q_type = "객관식" if i <= 15 else "단답형"
             blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": q_type, "domain": domain})
             
@@ -76,7 +76,6 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             elif i in [28, 29]: score = 4; diff = "준킬러(고난도)"; domain = f"{choice_subject} 심화 응용"
             elif i == 30: score = 4; diff = "초고난도(최종 킬러)"; domain = f"{choice_subject} 최고난도 융합 추론"
             else: score = 3; diff = "보통"; domain = choice_subject
-            
             q_type = "객관식" if i <= 28 else "단답형"
             blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": q_type, "domain": domain})
     else:
@@ -133,21 +132,36 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. 문항 텍스트 정제 필터 (과거 DB 오류 방어) ---
-def clean_question_text(text):
-    """DB에 잘못 저장되어 있던 선지 기호를 강제로 분리시키는 필터"""
-    if "①" in text:
-        text = text.split("①")[0].strip()
-    return text
+# --- 5. [핵심 복구] 과거 DB 데이터 자동 정제 로직 ---
+def process_question_data(item):
+    """DB에 잘못 들어간 구버전 데이터(선지 미분리)를 감지하고 실시간으로 쪼개주는 자동 복구 함수"""
+    q_text = item.get("question", "")
+    opts = item.get("options", [])
+    
+    # 1. 만약 과거 데이터라서 options 배열이 비어있는데, 텍스트 안에 '①'이 들어있다면? (복구 작업 진행)
+    if not opts and "①" in q_text:
+        parts = q_text.split("①")
+        q_text = parts[0].strip() # 순수 문제 텍스트
+        raw_opts = "①" + parts[1] # 선지 덩어리
+        
+        # 정규식을 통해 ①~⑤를 분리하여 options 배열 생성
+        found_opts = re.split(r'[①②③④⑤]', raw_opts)
+        opts = [opt.strip() for opt in found_opts if opt.strip()][:5]
+        
+    # 2. 만약 AI가 새롭게 생성한 데이터인데, 하지 말라는데도 문제 안에 '①'을 썼다면? (강제 절단)
+    elif opts and "①" in q_text:
+        q_text = q_text.split("①")[0].strip()
+        
+    return q_text, opts
 
-# --- 6. 창의성 스펙트럼 다중 문항 생성 로직 ---
+# --- 6. AI 생성 로직 (수식/선지 규격화 초강력 프롬프트) ---
 sem = asyncio.Semaphore(6)
 
 async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     
     if q_info['score'] == 4:
-        diff_instruction = "수능 4점 심화. (가), (나) 조건 박스 <div class='condition-box'>(가) ...<br>(나) ...</div> 필수 포함."
+        diff_instruction = "수능 4점 심화. (가), (나) 조건 박스 <div class='condition-box'>(가) ...<br>(나) ...</div> 필수."
         sol_instruction = "단계별(Step 1...)로 <div class='sol-step'> 태그 사용해 해설."
     else:
         diff_instruction = "수능 2~3점 기본 응용. 계산 위주 명료하게 출제."
@@ -155,24 +169,17 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
 
     type_instruction = "5지선다 객관식입니다. 'question' 텍스트 안에는 절대 ①~⑤ 선지를 쓰지 말고, 오직 'options' 배열에만 5개의 선지를 분리해서 넣으세요." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 [] 로 두세요."
 
-    # 수식 포맷팅(log, 첨자) 강제 프롬프트 추가
     prompt = f"""
     단원: {q_info['domain']} | 배점: {q_info['score']}점 | 유형: {q_info['type']}
     
-    [🚨 초강력 필수 규칙 - 위반 시 시스템 붕괴]
+    [🚨 초강력 필수 규칙 - 위반 시 에러 발생]
     1. 100% 한국어.
-    2. [수식 엄격 규칙]: 수식과 변수는 단 하나도 빠짐없이 무조건 $ $ 로 감싸서 정식 LaTeX 문법을 사용할 것. 
-       - 로그 기호는 반드시 `\\log_{{a}}{{b}}` 또는 `\\ln{{x}}` 형태로 작성할 것. (그냥 log_2 금지)
-       - 수열의 첨자나 다항식의 지수는 반드시 `a_{{n+1}}` 또는 `x^{{2n}}` 처럼 중괄호 {{}} 를 씌워 묶을 것.
+    2. [수식 완벽 규격화]: 모든 변수명과 수식은 무조건 $ $ 로 감싸서 정식 LaTeX 문법을 사용할 것. 
+       - 로그: 무조건 `\\log_{{a}}{{x}}` (밑은 반드시 _{{}} 처리. 그냥 log_2 금지)
+       - 수열 및 지수: 무조건 `a_{{n+1}}`, `2^{{x-1}}` 처럼 첨자에 중괄호 {{}} 필수.
     3. {diff_instruction}
     4. {sol_instruction}
-    5. [선지 분리 강제]: {type_instruction} "question" 텍스트에 ①, ②, ③, ④, ⑤ 기호를 적으면 절대 안 됩니다.
-    
-    [💡 창의적 스펙트럼 특별 지시]
-    단순히 숫자만 바꾸지 말고, {q_info['domain']} 개념을 유지하되 다음 비율로 {batch_size}개의 독립적인 문항을 만드세요:
-    - 3개: [기본 변형] 원본과 유사하게 숫자, 함수식 정도만 변경
-    - 4개: [응용 변형] 구하는 대상을 역으로 묻거나, 질문 방식을 비틀어서 제시
-    - 3개: [창의적 변형] 새로운 상황을 가정한 창의적이고 참신한 형태
+    5. [선지 분리 강제]: {type_instruction} "question"에는 ①, ② 기호 절대 금지.
     
     오직 아래 JSON 배열(Array) 형식만 반환:
     [
@@ -201,13 +208,10 @@ async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
                 data_list = json.loads(text.strip())
                 parsed_questions = []
                 for data in data_list:
-                    # 파이썬 안전장치 적용
-                    q_text = clean_question_text(data.get("question", "오류"))
-                    
                     parsed_questions.append({
                         "sub": q_info['sub'], "diff": q_info['diff'], 
                         "score": q_info['score'], "type": q_info['type'], "domain": q_info['domain'],
-                        "question": q_text, 
+                        "question": data.get("question", "오류"), 
                         "options": data.get("options", []),
                         "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
                     })
@@ -224,10 +228,8 @@ async def get_or_generate_question(q_info, used_ids):
         selected = random.choice(fresh_qs)
         used_ids.add(selected.doc_id)
         return {
-            "num": q_info['num'], "score": q_info['score'],
-            # DB에서 가져올 때도 혹시 모를 오염 데이터를 정제합니다
-            "question": clean_question_text(selected['question']), 
-            "options": selected.get('options', []),
+            "num": q_info['num'], "score": q_info['score'], "type": q_info['type'],
+            "question": selected['question'], "options": selected.get('options', []),
             "solution": selected['solution'], "source": "DB"
         }
     
@@ -237,7 +239,7 @@ async def get_or_generate_question(q_info, used_ids):
         first_q['num'] = q_info['num']
         return {**first_q, "source": "AI", "raw_batch": new_qs}
     else:
-        return {"num": q_info['num'], "score": q_info['score'], "question": "API 오류", "options": [], "solution": "오류", "source": "ERROR"}
+        return {"num": q_info['num'], "score": q_info['score'], "type": q_info['type'], "question": "API 오류", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def generate_exam_orchestrator(choice_subject, total_num, custom_score=None):
     blueprint = get_exam_blueprint(choice_subject, total_num, custom_score)
@@ -259,13 +261,24 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
         pair = results[i:i+2]
         q_content = ""
         for item in pair:
-            opts = item.get('options', [])
-            if opts and len(opts) >= 5:
-                opt_html = f"<div class='options-container'><span>① {opts[0]}</span><span>② {opts[1]}</span><span>③ {opts[2]}</span><span>④ {opts[3]}</span><span>⑤ {opts[4]}</span></div>"
-            else:
-                opt_html = ""
+            # 방금 만든 Auto-Repair 함수 통과
+            q_text, opts = process_question_data(item)
             
-            q_content += f"<div class='question-box'><span class='q-num'>{item['num']}</span> {item['question']} <span class='q-score'>[{item['score']}점]</span>{opt_html}</div>"
+            # 객관식일 경우 무조건 선지 렌더링 시도
+            if item.get('type') == '객관식':
+                if opts and len(opts) >= 1:
+                    spans = []
+                    for idx, opt in enumerate(opts[:5]):
+                        # 기존의 숫자 찌꺼기 완벽 제거
+                        clean_opt = re.sub(r'^[①②③④⑤\d][\.\)]?\s*', '', str(opt)).strip()
+                        spans.append(f"<span>{chr(9312+idx)} {clean_opt}</span>")
+                    opt_html = f"<div class='options-container'>{''.join(spans)}</div>"
+                else:
+                    opt_html = "<div class='options-container'><span>선지 오류</span></div>"
+            else:
+                opt_html = "" # 단답형
+            
+            q_content += f"<div class='question-box'><span class='q-num'>{item['num']}</span> {q_text} <span class='q-score'>[{item['score']}점]</span>{opt_html}</div>"
             sol_html += f"<div class='sol-item'><b>{item['num']}번 해설:</b> {item['solution']}</div>"
         
         pages_html += f"<div class='paper'><div class='header'><h1>2026학년도 대학수학능력시험 모의평가</h1><h3>수학 영역 ({choice_subject})</h3></div><div class='question-grid'>{q_content}</div></div>"
@@ -273,7 +286,7 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
     db_hits = sum(1 for r in results if r.get('source') == 'DB')
     return pages_html, sol_html, time.time() - start_time, db_hits
 
-# --- 백그라운드 스펙트럼 DB 무한 생성 스레드 ---
+# --- 7. 백그라운드 DB 파밍 스레드 ---
 def run_auto_farmer():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -293,7 +306,6 @@ async def auto_farm_loop():
                 
                 for q in batch_qs:
                     bank_db.insert(q)
-                    
             await asyncio.sleep(20) 
         except Exception:
             await asyncio.sleep(20)
@@ -303,7 +315,7 @@ if 'auto_farmer_started' not in st.session_state:
     t.start()
     st.session_state.auto_farmer_started = True
 
-# --- 7. UI 및 세션 관리 ---
+# --- 8. UI 및 세션 관리 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 
 if 'verified' not in st.session_state: st.session_state.verified = False
@@ -375,7 +387,7 @@ if st.session_state.verified:
         st.info(f"📊 남은 횟수: {remain} | 과목: {choice_sub} | 난이도: {diff_info}")
         
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"DB 검색 및 AI 스펙트럼 렌더링 동시 진행 중..."):
+            with st.spinner(f"DB 검색 및 자동 복구 렌더링 진행 중..."):
                 p, s, elapsed, db_hits = asyncio.run(generate_exam_orchestrator(choice_sub, num, custom_score_val))
                 
                 st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 스펙트럼 자동 생성: {num - db_hits}개)")
