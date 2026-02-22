@@ -23,7 +23,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 자물쇠 (동시성 에러 방지) ---
+# --- 2. DB 및 전역 락 (충돌 방지 최적화) ---
 @st.cache_resource
 def get_databases():
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
@@ -37,29 +37,29 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 텍스트 정제 및 옵션 처리 ---
+# --- 3. 정제 및 옵션 처리 ---
 def polish_math(text):
     if not text: return ""
-    # 메타데이터 문구 삭제 (image_10833d 방지)
     text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[.*?점\]$', '', text.strip())
     return text.strip()
 
 def clean_option(text):
-    # 선지 번호 기호만 정밀하게 제거 (image_060658 방지)
     return re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
 
 def safe_save_to_bank(batch):
+    """백그라운드에서 대량의 문제를 안전하고 빠르게 저장"""
     def _bg_save():
         with DB_LOCK:
             for q in batch:
                 try:
+                    # 지문 텍스트 기준으로 중복 검사 후 삽입
                     if not bank_db.search(QBank.question == q.get("question", "")):
                         bank_db.insert(q)
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. HTML 템플릿 (자바스크립트 수식 교정 엔진 유지) ---
+# --- 4. HTML 템플릿 (JS 수식 교정 유지) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -74,7 +74,6 @@ def get_html_template(p_html, s_html):
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <script>
-            // 브라우저 단에서 lim 수직 정렬 및 기호 강제 교정
             document.addEventListener("DOMContentLoaded", function() {{
                 const content = document.body.innerHTML;
                 let fixed = content
@@ -89,7 +88,7 @@ def get_html_template(p_html, s_html):
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700;800&display=swap');
             * {{ font-family: 'Nanum Myeongjo', serif !important; }}
-            body {{ background: #f0f2f6; margin: 0; color: #000; }}
+            body {{ background: #f0f2f6; color: #000; margin: 0; }}
             .paper-container {{ display: flex; flex-direction: column; align-items: center; padding: 20px 0; }}
             .paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); position: relative; }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; margin-bottom: 35px; padding-bottom: 10px; }}
@@ -108,7 +107,7 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 5. 수능 블루프린트 (난이도 선택 완벽 대응) ---
+# --- 5. 수능 블루프린트 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
@@ -119,20 +118,19 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             score = 2 if i in [23, 24] else 4 if i in [29, 30] else 3
             blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식" if i <= 28 else "단답형"})
     else:
-        # 맞춤 문항 모드: 사용자가 선택한 배점(score)을 강제 적용
         for i in range(1, total_num + 1):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식"})
     return blueprint
 
-# --- 6. AI 생성 및 엔진 ---
-async def generate_batch_ai(q_info, size=5):
+# --- 6. AI 생성 엔진 (가속 모드) ---
+async def generate_batch_ai(q_info, size=10): # 배치 사이즈를 10개로 상향하여 파밍 가속
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']}
 [규칙] 1. 수식 $ $ 필수. 2. 극한은 lim x->0 형태로 작성. 3. JSON 배열 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
     try:
         res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
-        return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in json.loads(res.text.strip())]
+        return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "score": q_info['score'], "type": q_info.get('type', '객관식')} for d in json.loads(res.text.strip())]
     except: return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
@@ -143,7 +141,7 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
         sel = random.choice(fresh)
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB"}
-    new_batch = await generate_batch_ai(q_info)
+    new_batch = await generate_batch_ai(q_info, size=5) # 발간 시에는 5개씩 생성
     if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
     return {"num": q_info['num'], "question": "서버 로딩 중..", "options": [], "solution": "오류"}
 
@@ -168,49 +166,4 @@ async def run_orchestrator(sub, num, score_v=None):
             opt_html = f"<div class='options-container'>{''.join([f'<span>{chr(9312+j)} {clean_option(o)}</span>' for j, o in enumerate(opts[:5])])}</div>" if item.get('type') == '객관식' else ""
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
             s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math(item.get('solution',''))}</div>"
-        p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
-    return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
-
-# --- 7. UI 및 인증 ---
-def send_verification_email(receiver, code):
-    try:
-        msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
-        msg.attach(MIMEText(f"번호: [{code}]", 'plain'))
-        s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(SENDER_EMAIL, SENDER_PASS); s.send_message(msg); s.quit()
-        return True
-    except: return False
-
-st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
-if 'v' not in st.session_state: st.session_state.v = False
-
-with st.sidebar:
-    st.title("🎓 본부 인증")
-    email_in = st.text_input("이메일", value=ADMIN_EMAIL if st.session_state.v else "")
-    if email_in == ADMIN_EMAIL: st.session_state.v = True
-    if not st.session_state.v:
-        if st.button("인증번호 발송"):
-            code = str(random.randint(100000, 999999))
-            if send_verification_email(email_in, code):
-                st.session_state.auth_code, st.session_state.mail_sent = code, True
-                st.success("발송 완료!")
-        if st.session_state.get('mail_sent'):
-            c_in = st.text_input("6자리 입력")
-            if st.button("확인"):
-                if c_in == st.session_state.auth_code:
-                    st.session_state.v = True; st.rerun()
-
-    if st.session_state.v:
-        st.divider()
-        mode = st.radio("모드", ["맞춤 문항", "30문항 풀세트"])
-        sub = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
-        num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
-        # [복구] 난이도(배점) 선택 기능
-        score_v = int(st.selectbox("문항 난이도 (배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
-        btn = st.button("🚀 발간 시작", use_container_width=True)
-        with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
-
-if st.session_state.v and btn:
-    with st.spinner("모든 기능을 활성화하여 조판 중..."):
-        p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score_v))
-        st.success(f"✅ 완료! ({elap:.1f}초)")
-        st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
+        p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({sub})</h3></div><div class='question-grid'>{q_cont}</div></div>
