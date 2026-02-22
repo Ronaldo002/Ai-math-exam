@@ -31,7 +31,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 ---
+# --- 2. DB 및 전역 락 (자가 치유) ---
 @st.cache_resource
 def get_databases():
     try:
@@ -92,10 +92,9 @@ def safe_save_to_bank(batch, expected_type):
                     except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. [개선] 2026 수능 비율형 블루프린트 설계 ---
+# --- 5. 2026 수능 비율형 블루프린트 설계 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
-    
     m1_topics = ["지수함수와 로그함수", "삼각함수", "수열"]
     m2_topics = ["함수의 극한과 연속", "다항함수의 미분법", "다항함수의 적분법"]
     choice_map = {
@@ -105,19 +104,16 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     }
     
     if total_num == 30:
-        # 1~15번 (공통 객관식)
         for i in range(1, 16):
             sub = "수학 I" if i % 2 != 0 else "수학 II"
             topic = m1_topics[(i//2) % 3] if sub == "수학 I" else m2_topics[(i//2) % 3]
             score = 2 if i <= 3 else 4 if i in [9,10,11,12,13,14,15] else 3
             blueprint.append({"num": i, "sub": sub, "topic": topic, "score": score, "type": "객관식"})
-        # 16~22번 (공통 주관식)
         for i in range(16, 23):
             sub = "수학 II" if i % 2 == 0 else "수학 I"
             topic = m2_topics[i % 3] if sub == "수학 II" else m1_topics[i % 3]
             score = 4 if i in [21, 22] else 3
             blueprint.append({"num": i, "sub": sub, "topic": topic, "score": score, "type": "주관식"})
-        # 23~30번 (선택과목)
         for i in range(23, 31):
             topics = choice_map[choice_sub]
             topic = topics[(i-23) % 3]
@@ -125,12 +121,10 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             q_type = "객관식" if i <= 28 else "주관식"
             blueprint.append({"num": i, "sub": choice_sub, "topic": topic, "score": score, "type": q_type})
     else:
-        # 맞춤 문항: 선택한 과목의 단원들을 비율에 맞춰 순차 배분
-        topics = choice_map.get(choice_sub, ["수학 I", "수학 II"]) # 기본값 대응
+        topics = choice_map.get(choice_sub, ["수학 I", "수학 II"])
         for i in range(1, total_num + 1):
             topic = topics[(i-1) % len(topics)]
             blueprint.append({"num": i, "sub": choice_sub, "topic": topic, "score": custom_score or 3, "type": "객관식"})
-            
     return blueprint
 
 # --- 6. HTML 템플릿 ---
@@ -195,7 +189,6 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, total_num):
     with DB_LOCK:
         available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.topic == q_info['topic']) & (QBank.score == q_info['score']) & (QBank.type == q_info['type']))
     
-    # [핵심] 가변 쿼터제: 전체 문항 수에 따라 단원당 허용 개수를 유동적으로 조절
     quota_limit = max(2, (total_num // 3) + 1)
     fresh = [q for q in available if str(q.doc_id) not in used_ids and q.get('batch_id') not in used_batch_ids]
     strict_fresh = [q for q in fresh if topic_counts.get(q.get('topic', '기타'), 0) < quota_limit]
@@ -211,7 +204,9 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, total_num):
         sel = new_batch[0]
         topic_counts[sel.get('topic', '기타')] = topic_counts.get(sel.get('topic', '기타'), 0) + 1
         return {**sel, "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    return {"num": q_info.get('num', 0), "score": 3, "type": "객관식", "question": "지연 발생", "options": [], "solution": "오류"}
+        
+    # [수정 포인트] 에러 발생 시에도 source 키를 반드시 포함하여 반환
+    return {"num": q_info.get('num', 0), "score": 3, "type": "객관식", "question": "지연 발생", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     blueprint = get_exam_blueprint(sub_choice, num_choice, score_choice)
@@ -255,7 +250,9 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
             s_html += f"<div class='sol-item'><b>{num}번:</b> {polish_output(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1></div>{header_html}<div class='question-grid'>{q_chunk}</div></div>"
     
-    return get_html_template(p_html, s_html), sum(1 for r in results if r.get('source').startswith('DB'))
+    # [수정 포인트] r.get('source')가 None일 경우를 대비하여 안전하게 카운트
+    db_hits = sum(1 for r in results if r.get('source') and r.get('source').startswith('DB'))
+    return get_html_template(p_html, s_html), db_hits
 
 # --- 9. 파밍 엔진 ---
 def run_auto_farmer():
@@ -306,6 +303,9 @@ with st.sidebar:
 
 if st.session_state.verified and btn:
     with st.spinner("비율 최적화 조판 중..."):
-        html_out, hits = asyncio.run(run_orchestrator(sub, num, score_val))
-        st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
-        st.components.v1.html(html_out, height=1200, scrolling=True)
+        try:
+            html_out, hits = asyncio.run(run_orchestrator(sub, num, score_val))
+            st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
+            st.components.v1.html(html_out, height=1200, scrolling=True)
+        except Exception as e:
+            st.error(f"❌ 발간 중 오류가 발생했습니다: {e}")
