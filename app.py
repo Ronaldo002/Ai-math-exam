@@ -16,8 +16,11 @@ else:
     st.error("Secrets 설정(PAID_API_KEY, EMAIL_USER, EMAIL_PASS)이 필요합니다!")
     st.stop()
 
+# 유저 DB 및 문제은행 DB 세팅
 db = TinyDB('user_registry.json')
 User = Query()
+bank_db = TinyDB('question_bank.json')
+QBank = Query()
 
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
@@ -30,8 +33,7 @@ def send_verification_email(receiver_email, code):
         msg['From'] = SENDER_EMAIL
         msg['To'] = receiver_email
         msg['Subject'] = "[Premium 수능수학] 인증번호 발송"
-        msg.attach(MIMEText(f"안녕하세요. 요청하신 인증번호는 [{code}] 입니다.\n화면에 번호를 입력하여 인증을 완료해 주세요.", 'plain'))
-        
+        msg.attach(MIMEText(f"안녕하세요. 요청하신 인증번호는 [{code}] 입니다.", 'plain'))
         server = smtplib.SMTP('smtp.gmail.com', 587)
         server.starttls()
         server.login(SENDER_EMAIL, SENDER_PASS)
@@ -39,12 +41,10 @@ def send_verification_email(receiver_email, code):
         server.quit()
         return True
     except Exception as e:
-        st.error(f"메일 발송 에러: {e}")
         return False
 
 def check_user_limit(email):
-    if email == ADMIN_EMAIL:
-        return True, "무제한 (관리자)"
+    if email == ADMIN_EMAIL: return True, "무제한 (관리자)"
     user = db.table('users').get(User.email == email)
     if not user:
         db.table('users').insert({'email': email, 'count': 0})
@@ -61,24 +61,23 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             elif i <= 8: score = 3; diff = "보통"
             elif i in [15, 21, 22]: score = 4; diff = "킬러(고난도)"
             else: score = 4; diff = "준킬러"
-            q_type = "객관식" if i <= 15 else "단답형(주관식)"
+            q_type = "객관식" if i <= 15 else "단답형"
             blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": q_type})
-            
         for i in range(23, 31):
             if i <= 24: score = 2; diff = "쉬움"
             elif i <= 27: score = 3; diff = "보통"
             elif i == 30: score = 4; diff = "최종 킬러"
             else: score = 4; diff = "준킬러"
-            q_type = "객관식" if i <= 28 else "단답형(주관식)"
+            q_type = "객관식" if i <= 28 else "단답형"
             blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": q_type})
     else:
         for i in range(1, total_num + 1):
             score = custom_score if custom_score else 3
-            diff = "쉬움" if score == 2 else "보통" if score == 3 else "어려움(4점)"
+            diff = "쉬움" if score == 2 else "보통" if score == 3 else "어려움"
             blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": "객관식"})
     return blueprint
 
-# --- 4. 가독성 최적화 & PDF 다운로드 템플릿 ---
+# --- 4. HTML/CSS 템플릿 (가독성 최적화 유지) ---
 def get_html_template(subject, pages_html, solutions_html):
     return f"""
     <!DOCTYPE html>
@@ -86,52 +85,31 @@ def get_html_template(subject, pages_html, solutions_html):
     <head>
         <meta charset="utf-8">
         <script>
-            window.MathJax = {{
-                tex: {{ inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$', '$$']] }},
-                chtml: {{ scale: 0.98, matchFontHeight: true }} 
-            }};
+            window.MathJax = {{ tex: {{ inlineMath: [['$', '$'], ['\\\\(', '\\\\)']], displayMath: [['$$', '$$']] }}, chtml: {{ scale: 0.98, matchFontHeight: true }} }};
         </script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700;800&display=swap');
             * {{ font-family: 'Nanum Myeongjo', serif !important; word-break: keep-all; letter-spacing: -0.5px; }}
             body {{ background: #f0f2f6; margin: 0; padding: 0; color: #000; }}
-            
-            .btn-download {{ 
-                position: fixed; top: 20px; right: 20px; padding: 12px 24px; 
-                background: #000; color: #fff; border: none; cursor: pointer; 
-                z-index: 1000; font-weight: bold; border-radius: 5px; 
-                box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: background 0.2s;
-            }}
+            .btn-download {{ position: fixed; top: 20px; right: 20px; padding: 12px 24px; background: #000; color: #fff; border: none; cursor: pointer; z-index: 1000; font-weight: bold; border-radius: 5px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); transition: background 0.2s; }}
             .btn-download:hover {{ background: #333; }}
-
             .paper-container {{ display: flex; flex-direction: column; align-items: center; padding: 20px 0; }}
             .paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; min-height: 297mm; position: relative; box-shadow: 0 5px 20px rgba(0,0,0,0.08); }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; padding-bottom: 12px; margin-bottom: 35px; }}
             .header h1 {{ font-weight: 800; font-size: 26pt; margin: 0; letter-spacing: -1.5px; }}
             .header h3 {{ font-weight: 700; font-size: 14pt; margin-top: 10px; }}
-            
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; min-height: 220mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            
             .question-box {{ position: relative; line-height: 2.0; font-size: 11pt; padding-left: 36px; margin-bottom: 45px; text-align: justify; word-break: break-all; }}
             .q-num {{ position: absolute; left: 0; top: 4px; font-weight: 800; border: 2px solid #000; width: 25px; height: 25px; text-align: center; line-height: 23px; font-size: 11.5pt; background: #fff; }}
             .q-score {{ font-weight: 700; font-size: 10.5pt; margin-left: 5px; }}
             .options-container {{ margin-top: 15px; font-size: 10.5pt; }}
-            
             .sol-section {{ border-top: 5px double #000; padding-top: 40px; }}
             .sol-item {{ margin-bottom: 35px; padding-bottom: 20px; border-bottom: 1px dashed #eee; line-height: 1.85; font-size: 10.5pt; }}
             .sol-step {{ margin-top: 8px; margin-bottom: 8px; padding-left: 10px; border-left: 3px solid #ccc; }}
-            
             mjx-container:not([display="true"]) {{ margin: 0 2px !important; }}
-
-            @media print {{
-                @page {{ size: A4; margin: 0; }}
-                body {{ background: white; }}
-                .btn-download {{ display: none !important; }}
-                .paper-container {{ padding: 0; }}
-                .paper {{ box-shadow: none; margin: 0; page-break-after: always; padding: 15mm; min-height: 297mm; }}
-            }}
+            @media print {{ @page {{ size: A4; margin: 0; }} body {{ background: white; }} .btn-download {{ display: none !important; }} .paper-container {{ padding: 0; }} .paper {{ box-shadow: none; margin: 0; page-break-after: always; padding: 15mm; min-height: 297mm; }} }}
         </style>
     </head>
     <body>
@@ -144,82 +122,88 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. [핵심] JSON 완전 분리 & Asyncio 비동기 렌더링 로직 ---
-async def fetch_paged_question(q_info):
+# --- 5. [문제은행 DB + 트래픽 제어] 비동기 엔진 ---
+# API 트래픽 제어: 한 번에 최대 10개씩만 요청하여 서버 과부하(Rate Limit) 방지
+sem = asyncio.Semaphore(10)
+
+async def generate_single_ai_q(q_info, retry=3):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
+    type_instruction = "①~⑤ 기호로 5지선다 선지 필수 포함." if q_info['type'] == "객관식" else "선지 없이 정답이 3자리 이하 자연수인 단답형."
+    sol_instruction = "수식 전개 위주로 간결하게." if q_info['score'] <= 3 else "논리적 단계별(Step 1...)로 아주 자세하게. <div class='sol-step'> 태그 사용."
+
+    prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']}점 | 유형:{q_info['type']}
+[규칙] 1. 100% 한국어. 영어 절대 금지. 정답은 해설 끝에 명시. 2. 수식은 $ $ 3. {type_instruction} 4. {sol_instruction}
+오직 아래 JSON 형식만 출력 (마크다운 ``` 금지):
+{{"question": "(문제 내용과 선지)", "solution": "(해설 및 정답)"}}"""
+
+    async with sem:
+        for attempt in range(retry):
+            try:
+                res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.7, response_mime_type="application/json"))
+                # JSON 파싱 안정성 강화
+                text = res.text.strip()
+                if text.startswith("```json"): text = text[7:]
+                if text.startswith("```"): text = text[3:]
+                if text.endswith("```"): text = text[:-3]
+                
+                data = json.loads(text.strip())
+                return {
+                    "sub": q_info['sub'], "diff": q_info['diff'], "score": q_info['score'], "type": q_info['type'],
+                    "question": data.get("question", "오류"), "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
+                }
+            except Exception as e:
+                if attempt == retry - 1:
+                    return None # 3번 실패 시 None 반환
+                await asyncio.sleep(1) # 실패 시 1초 대기 후 재시도
+
+async def get_or_generate_question(q_info, used_ids):
+    # 1. 문제 은행 DB 검색 (초광속 0.01초 컷)
+    available_qs = bank_db.search((QBank.sub == q_info['sub']) & (QBank.diff == q_info['diff']) & (QBank.type == q_info['type']))
+    fresh_qs = [q for q in available_qs if q.doc_id not in used_ids]
     
-    type_instruction = "①~⑤ 기호로 5지선다 선지 포함." if q_info['type'] == "객관식" else "선지 없는 단답형(정답은 3자리 이하 자연수)."
+    if fresh_qs:
+        selected = random.choice(fresh_qs)
+        used_ids.add(selected.doc_id)
+        return {
+            "num": q_info['num'], "score": q_info['score'],
+            "question": selected['question'], "solution": selected['solution'], "source": "DB"
+        }
     
-    if q_info['score'] <= 3:
-        sol_instruction = "주저리주저리 긴 문장 금지. 수식 전개 위주로 가장 간결하게 정답 도출 과정만 작성."
+    # 2. DB에 없으면 AI로 즉시 생성
+    new_q = await generate_single_ai_q(q_info)
+    if new_q:
+        return {"num": q_info['num'], "score": q_info['score'], "question": new_q['question'], "solution": new_q['solution'], "source": "AI", "raw_data": new_q}
     else:
-        sol_instruction = "4점 고난도 문항이므로 풀이 과정을 논리적 단계별(Step 1, Step 2...)로 아주 자세하게 설명. 단락 구분을 위해 <div class='sol-step'> 태그 활용."
+        return {"num": q_info['num'], "score": q_info['score'], "question": "문제 생성 실패 (API 과부하)", "solution": "오류", "source": "ERROR"}
 
-    prompt = f"""
-    과목:{q_info['sub']} | 번호:{q_info['num']}번 | 배점:{q_info['score']}점 | 유형:{q_info['type']}
-    
-    [필수 규칙]
-    1. 100% 한국어로만 작성. 영어 사용 절대 금지. 해설 마지막에 "정답: X" 형태로 명시.
-    2. 수식은 반드시 $ $ 로 감쌀 것.
-    3. {type_instruction}
-    4. {sol_instruction}
-    
-    반드시 아래의 JSON 형식으로만 응답하세요 (다른 텍스트 절대 불가):
-    {{"question": "(문제 내용과 선지)", "solution": "(해설 및 정답)"}}
-    """
-    
-    try:
-        # 비동기 호출 (await) 및 JSON 모드 강제
-        response = await model.generate_content_async(
-            prompt,
-            generation_config=genai.types.GenerationConfig(
-                temperature=0.7,
-                response_mime_type="application/json"  # 출력 토큰 다이어트의 핵심
-            )
-        )
-        data = json.loads(response.text)
-        
-        return {
-            "num": q_info['num'],
-            "score": q_info['score'],
-            "question": data.get("question", "생성 오류"),
-            "solution": data.get("solution", "해설 오류").replace("The final answer is", "정답은")
-        }
-    except Exception as e: 
-        return {
-            "num": q_info['num'], 
-            "score": q_info['score'], 
-            "question": "생성 중 오류 발생", 
-            "solution": "오류"
-        }
-
-async def generate_exam_async(choice_subject, total_num, custom_score=None):
+async def generate_exam_orchestrator(choice_subject, total_num, custom_score=None):
     blueprint = get_exam_blueprint(choice_subject, total_num, custom_score)
     start_time = time.time()
+    used_ids = set()
     
-    # asyncio.gather를 통한 완벽한 비동기 병렬 처리 (스레드 병목 제로)
-    tasks = [fetch_paged_question(q) for q in blueprint]
+    tasks = [get_or_generate_question(q, used_ids) for q in blueprint]
     results = await asyncio.gather(*tasks)
     
-    # 번호순 정렬
+    # 생성된 문제를 DB에 영구 저장 (다음 번 속도 향상을 위함)
+    for res in results:
+        if res.get("source") == "AI" and "raw_data" in res:
+            bank_db.insert(res["raw_data"])
+            
     results.sort(key=lambda x: x['num'])
     
+    # HTML 렌더링
     pages_html, sol_html = "", ""
     for i in range(0, len(results), 2):
         pair = results[i:i+2]
         q_content = ""
         for item in pair:
-            # 파이썬 로직에서 HTML을 조립하므로, AI는 토큰을 낭비하지 않음
             q_content += f"<div class='question-box'><span class='q-num'>{item['num']}</span> {item['question']} <span class='q-score'>[{item['score']}점]</span></div>"
             sol_html += f"<div class='sol-item'><b>{item['num']}번 해설:</b> {item['solution']}</div>"
         
-        pages_html += f"""
-        <div class="paper">
-            <div class="header"><h1>2026학년도 대학수학능력시험 모의평가</h1><h3>수학 영역 ({choice_subject})</h3></div>
-            <div class="question-grid">{q_content}</div>
-        </div>
-        """
-    return pages_html, sol_html, time.time() - start_time
+        pages_html += f"<div class='paper'><div class='header'><h1>2026학년도 대학수학능력시험 모의평가</h1><h3>수학 영역 ({choice_subject})</h3></div><div class='question-grid'>{q_content}</div></div>"
+    
+    db_hits = sum(1 for r in results if r.get('source') == 'DB')
+    return pages_html, sol_html, time.time() - start_time, db_hits
 
 # --- 6. UI 및 세션 관리 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
@@ -234,7 +218,6 @@ with st.sidebar:
     
     if email_input == ADMIN_EMAIL:
         st.session_state.verified = True
-        st.success("👑 관리자 자동 인증 완료")
     
     if not st.session_state.verified:
         if st.button("인증번호 발송"):
@@ -244,18 +227,16 @@ with st.sidebar:
                     st.session_state.auth_code = code
                     st.session_state.mail_sent = True
                     st.success("인증 메일 발송 완료!")
-            else:
-                st.warning("이메일을 입력하세요.")
+            else: st.warning("이메일을 입력하세요.")
         
         if st.session_state.mail_sent:
-            code_input = st.text_input("인증번호 6자리 입력")
+            code_input = st.text_input("인증번호 6자리")
             if st.button("인증 확인"):
-                if code_input == st.session_state.auth_code and st.session_state.auth_code:
+                if code_input == st.session_state.auth_code:
                     st.session_state.verified = True
                     st.session_state.mail_sent = False
                     st.rerun()
-                else:
-                    st.error("인증번호가 일치하지 않습니다.")
+                else: st.error("인증번호 불일치")
 
     if st.session_state.verified:
         st.divider()
@@ -270,7 +251,23 @@ with st.sidebar:
         else:
             num = 30
         
-        generate_btn = st.button("🚀 비동기 초고속 시험지 발간", use_container_width=True)
+        generate_btn = st.button("🚀 지능형 초고속 발간", use_container_width=True)
+        
+        # [혁신] 관리자 전용 DB 축적 패널
+        if email_input == ADMIN_EMAIL:
+            st.divider()
+            st.caption(f"🗄️ 현재 DB 축적량: {len(bank_db)}문항")
+            if st.button("🤖 백그라운드 DB 10개 충전"):
+                with st.spinner("DB에 문항을 비축 중입니다..."):
+                    async def stock_db():
+                        q_info = {"num":0, "sub": choice_sub, "diff": "어려움", "score": 4, "type": "객관식"}
+                        tasks = [generate_single_ai_q(q_info) for _ in range(10)]
+                        res = await asyncio.gather(*tasks)
+                        for r in res:
+                            if r: bank_db.insert(r)
+                    asyncio.run(stock_db())
+                    st.success("충전 완료!")
+                    st.rerun()
 
 # 메인 화면 영역
 if st.session_state.verified:
@@ -280,11 +277,11 @@ if st.session_state.verified:
         st.info(f"📊 남은 횟수: {remain} | 과목: {choice_sub} | 난이도: {diff_info}")
         
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"⚡ Asyncio 비동기 엔진으로 문항을 렌더링 중입니다. 엄청나게 빠릅니다!"):
-                # 비동기 함수 실행 (Streamlit 환경)
-                p, s, elapsed = asyncio.run(generate_exam_async(choice_sub, num, custom_score_val))
+            with st.spinner(f"DB 검색 및 AI 렌더링 동시 진행 중..."):
+                p, s, elapsed, db_hits = asyncio.run(generate_exam_orchestrator(choice_sub, num, custom_score_val))
                 
-                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초)")
+                # DB 효율 피드백 추가
+                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 신규 생성: {num - db_hits}개)")
                 st.components.v1.html(get_html_template(choice_sub, p, s), height=1400, scrolling=True)
                 
                 if email_input != ADMIN_EMAIL:
