@@ -76,7 +76,6 @@ def clean_option(text):
 
 # --- 4. 무결점 검수 엔진 ---
 def is_valid_question(q, expected_type):
-    # 단원명(topic) 필드 존재 여부 필수 검사
     if not q.get('topic') or not str(q.get('topic')).strip(): return False
     if not q.get('question') or not str(q.get('question')).strip(): return False
     if not q.get('solution') or not str(q.get('solution')).strip(): return False
@@ -158,30 +157,30 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. 전 과목 다이내믹 창의성 룰렛 (유형 쏠림 방지 강화) ---
+# --- 7. 전 과목 다이내믹 창의성 룰렛 ---
 def get_universal_twist(sub, score):
     if sub == "확률과 통계":
-        return random.choice(["🚫 주머니/상자 상황 금지", "📊 실생활 데이터 통계", "🧩 조건 추론(함수의 개수)"])
+        return random.choice(["🚫 주머니/상자 금지", "📊 실생활 통계", "🧩 조건 추론(함수의 개수)"])
     elif sub == "미적분":
-        return random.choice(["📈 초월함수의 그래프 추론", "📐 급수의 기하학적 활용", "🔄 치환/부분적분의 창의적 적용"])
+        return random.choice(["📈 초월함수 그래프 추론", "📐 급수 기하 활용", "🔄 치환/부분적분 응용"])
     elif sub == "수학 I, II":
-        return random.choice(["🔢 수열의 귀납적 정의와 추론", "📡 삼각함수의 실생활 주기성 모델링", "🔍 함수의 연속과 미분가능성 심화"])
+        return random.choice(["🔢 수열 귀납적 추론", "📡 삼각함수 주기성 모델링", "🔍 함수의 연속성 심화"])
     elif sub == "기하":
-        return random.choice(["📐 벡터 내적의 기하학적 의미", "🔄 이차곡선의 정의 활용", "📍 공간도형의 정사영"])
-    return "[기초/응용] 수능 표준 유형 융합."
+        return random.choice(["📐 벡터 내적 기하 의미", "🔄 이차곡선 정의 활용", "📍 공간도형 정사영"])
+    return "[기초/응용] 표준 유형 융합."
 
-# --- 8. 프롬프트 및 메인 엔진 (Topic 필드 강제) ---
+# --- 8. 프롬프트 및 메인 엔진 ---
 def build_strict_prompt(q_info, size):
     creative_twist = get_universal_twist(q_info['sub'], q_info['score'])
     opt_rule = "객관식: 5개 선지 필수." if q_info['type'] == '객관식' else "주관식: options 비움."
 
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
-[지시사항]
-1. 언어/범위: 한국어. '{q_info['sub']}' 교육과정 엄수.
-2. 💡 다양성: {creative_twist} (기존 흔한 유형 탈피)
+[지시]
+1. 한국어. '{q_info['sub']}' 범위 엄수.
+2. 💡 다양성: {creative_twist}
 3. 유형: {opt_rule}
 4. 형식: 수식 $ $ 필수. 벡터는 \\vec{{a}} 형식.
-5. JSON 배열 {size}개 생성: [{{ "topic": "출제 단원명(구체적으로)", "question": "...", "options": [...], "solution": "..." }}]"""
+5. JSON 배열 {size}개 생성: [{{ "topic": "출제 단원명", "question": "...", "options": [...], "solution": "..." }}]"""
     return prompt
 
 async def generate_batch_ai(q_info, size=2): 
@@ -196,7 +195,7 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts):
     with DB_LOCK:
         available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.score == q_info['score']) & (QBank.type == q_info['type']))
     
-    # 1. 2문항 이하 쿼터제 적용 필터링 (전 과목 공통)
+    # 전 과목 2문항 쿼터제
     fresh = [q for q in available if str(q.doc_id) not in used_ids and q.get('batch_id') not in used_batch_ids]
     strict_fresh = [q for q in fresh if topic_counts.get(q.get('topic', '기타'), 0) < 2]
     
@@ -210,7 +209,6 @@ async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts):
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB+"}
     
-    # 2. 실시간 AI 생성
     new_batch = await generate_batch_ai(q_info, size=2)
     if new_batch:
         sel = new_batch[0]
@@ -225,12 +223,15 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     for i in range(0, len(blueprint), 2):
         chunk = blueprint[i : i + 2]
+        status.text(f"⏳ {i+1}번 ~ {min(i+2, 30)}번 유형별 균형 조판 중...")
         tasks = [get_safe_q(q, used_ids, used_batch_ids, topic_counts) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
         all_new = [r['full_batch'] for r in chunk_res if r.get('source') == "AI" and "full_batch" in r]
         if all_new: safe_save_to_bank([item for sublist in all_new for item in sublist], chunk[0]['type'])
         prog.progress(min((i + 2) / len(blueprint), 1.0))
+        await asyncio.sleep(0.8)
+    status.empty(); prog.empty()
     
     results.sort(key=lambda x: x.get('num', 999))
     p_html, s_html = "" , ""
@@ -283,7 +284,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 10. UI 및 관리자 메뉴 ---
+# --- 10. UI 및 인증 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 if 'verified' not in st.session_state: st.session_state.verified, st.session_state.user_email = False, ""
 
@@ -296,12 +297,9 @@ with st.sidebar:
     else:
         st.success(f"✅ {st.session_state.user_email}")
         if st.button("🚪 로그아웃"): st.session_state.verified = False; st.rerun()
-        
         if st.session_state.user_email == ADMIN_EMAIL:
-            st.warning("👑 관리자 권한")
             if st.button("🚨 전체 DB 초기화"): st.session_state.confirm_all = True
             if st.session_state.get('confirm_all'):
-                st.error("⚠️ 정말로 모든 과목의 문제를 삭제하시겠습니까?")
                 if st.button("✔️ 전체 삭제 승인", type="primary"):
                     with DB_LOCK: bank_db.truncate()
                     st.session_state.confirm_all = False; st.rerun()
@@ -311,11 +309,17 @@ with st.sidebar:
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
         sub = st.selectbox("선택과목", ["확률과 통계", "미적분", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 10, step=2)
+        
+        # [복구] 난이도 설정 슬롯
+        score_val = None
+        if mode == "맞춤 문항":
+            score_val = int(st.selectbox("난이도 설정 (배점)", ["2", "3", "4"]))
+            
         btn = st.button("🚀 발간 시작", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ 무결점 DB: {len(bank_db)}")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중... (전 과목 유형 분배 검수 중)"):
-        html_out, hits = asyncio.run(run_orchestrator(sub, num))
+    with st.spinner("AI 엔진 가동 중..."):
+        html_out, hits = asyncio.run(run_orchestrator(sub, num, score_val))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(html_out, height=1200, scrolling=True)
