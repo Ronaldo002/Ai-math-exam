@@ -124,4 +124,3 @@ if email:
             st.components.v1.html(final_content, height=1200, scrolling=True)
 else:
     st.info("이메일 입력 후 시작하세요.")
-
