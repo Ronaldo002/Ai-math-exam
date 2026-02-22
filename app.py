@@ -55,6 +55,8 @@ DB_LOCK = get_global_lock()
 
 # --- 3. 초정밀 불량품 폐기소 ---
 def is_valid_question(q, expected_type):
+    # topic(단원명)이 제대로 생성되었는지도 추가로 검사
+    if not q.get('topic') or not str(q.get('topic')).strip(): return False
     if not q.get('question') or not str(q.get('question')).strip(): return False
     if not q.get('solution') or not str(q.get('solution')).strip(): return False
     
@@ -160,96 +162,105 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. [신규] 다이내믹 창의성 룰렛 (Dynamic Twist Generator) ---
+# --- 7. 다이내믹 창의성 룰렛 ---
 def get_creative_twist(score):
-    """낮은 난이도 문제에 참신함을 부여하는 룰렛 함수"""
     if score == 2:
-        twists = [
-            "[단순 연산 회피] 단순 계산식 대신, 낯선 기호를 새롭게 정의하여 그 값을 구하는 2점 문제로 출제.",
-            "[도형/그래프 해석] 간단한 2차원 그래프나 도형의 넓이/길이를 활용하여 개념을 묻는 참신한 2점 문제로 출제.",
-            "[명제/정의] 수식 풀이보다 수학적 개념의 '정의' 자체를 정확히 알고 있는지 묻는 2점 문제로 출제.",
-            "[기본 연산] 수능에 자주 나오는 깔끔하고 정석적인 2점 연산 문제로 출제."
-        ]
-        return random.choice(twists)
+        return random.choice([
+            "[단순 연산 회피] 낯선 기호를 새롭게 정의하여 그 값을 구하는 참신한 2점 문제 출제.",
+            "[도형/그래프 해석] 간단한 2차원 그래프나 도형을 활용하여 개념을 묻는 2점 문제 출제.",
+            "[기본 연산] 수능에 자주 나오는 깔끔하고 정석적인 2점 연산 문제 출제."
+        ])
     elif score == 3:
-        twists = [
-            "[실생활 연계] 특정 과학적 현상이나 실생활 데이터를 수학적 함수로 모델링하는 창의적인 문장제 3점 문제로 출제.",
-            "[융합형 문제] 두 가지 이상의 서로 다른 수학 단원 개념이 가볍고 조화롭게 융합된 3점 문제로 출제.",
-            "[조건 추론형] (가), (나) 형태의 간단한 조건을 제시하고 이를 통해 숨겨진 함수나 값을 찾아내는 3점 문제로 출제.",
-            "[대칭성/주기성] 그래프의 대칭성, 주기성, 혹은 평행이동의 직관적인 성질을 활용해야 쉽게 풀리는 3점 문제로 출제.",
-            "[새로운 함수] $h(x) = max(f(x), g(x))$ 와 같이 새로운 함수를 정의하고 그 특징을 묻는 3점 문제로 출제."
-        ]
-        return random.choice(twists)
+        return random.choice([
+            "[실생활 연계] 특정 과학적 현상이나 실생활 데이터를 활용한 창의적인 문장제 3점 문제 출제.",
+            "[융합형 문제] 두 가지 이상의 서로 다른 수학 단원 개념이 조화롭게 융합된 3점 문제 출제.",
+            "[조건 추론형] (가), (나) 형태의 간단한 조건을 제시하여 숨겨진 값을 찾아내는 3점 문제 출제."
+        ])
     elif score == 4:
-        return "[초고난도 신유형] 기존 기출문제를 암기해서 풀 수 없는, 고도의 추론과 여러 개념의 결합이 필요한 낯선 상황을 제시할 것."
+        return "[초고난도 신유형] 고도의 추론과 여러 개념의 결합이 필요한 낯선 상황 제시."
     return ""
 
-# --- 8. 프롬프트 및 메인 화면 엔진 ---
+# --- 8. 프롬프트 및 메인 화면 엔진 (단원명 추가) ---
 def build_strict_prompt(q_info, size):
     creative_twist = get_creative_twist(q_info['score'])
-    
-    opt_rule = "객관식이므로 options 배열에 5개의 선지를 반드시 작성할 것." if q_info['type'] == '객관식' else "주관식(단답형)이므로 options 배열은 비워둘 것([])."
+    opt_rule = "객관식이므로 options 배열에 5개의 선지 필수." if q_info['type'] == '객관식' else "주관식(단답형)이므로 options 배열 비울 것([])."
 
+    # AI에게 'topic' 필드를 강제 생성하도록 지시
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
 [최우선 필수 지시사항] 
-1. 언어: 모든 문제, 해설은 반드시 한국어로 작성 (영어 금지).
-2. 범위: 반드시 '{q_info['sub']}' 교육과정 내에서만 출제.
-3. 💡 창의성/난이도 조건: {creative_twist}
-4. 유형: {opt_rule}
-5. 형식: 수식 $ $ 필수. 과목명, 배점 등 부가 텍스트 절대 금지.
-JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}]"""
+1. 언어/범위: 한국어. '{q_info['sub']}' 교육과정 내 출제.
+2. 창의성/난이도: {creative_twist}
+3. 유형: {opt_rule}
+4. 형식: 수식 $ $ 필수. 부가 텍스트 절대 금지.
+JSON 배열 {size}개 생성: [{{ "topic": "출제 단원명(예: 지수함수, 미분법 등)", "question": "...", "options": [...], "solution": "..." }}]"""
     return prompt
 
 async def generate_batch_ai(q_info, size=2): 
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     prompt = build_strict_prompt(q_info, size)
-    
     try:
         res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
         raw_text = res.text.strip()
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
         data = json.loads(match.group(0)) if match else json.loads(raw_text)
-            
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
     except: return []
 
-async def get_safe_q(q_info, used_ids, used_batch_ids):
+# [핵심] 단원 분배(topic_counts) 장부가 파라미터로 추가되었습니다.
+async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts):
     with DB_LOCK:
         available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.score == q_info['score']) & (QBank.type == q_info['type']))
+    
+    # 중복 제거 (쌍둥이 문제 배제)
     fresh = [q for q in available if str(q.doc_id) not in used_ids and q.get('batch_id') not in used_batch_ids]
-    if fresh:
-        sel = random.choice(fresh)
+    
+    # 1차 필터링: 특정 단원(topic)이 2개 미만으로 쓰인 문제만 엄격하게 추림
+    strict_fresh = [q for q in fresh if topic_counts.get(q.get('topic', '기타'), 0) < 2]
+    
+    if strict_fresh:
+        sel = random.choice(strict_fresh)
+        topic = sel.get('topic', '기타')
+        topic_counts[topic] = topic_counts.get(topic, 0) + 1
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB", "cat": q_info.get('cat', '공통')}
     
+    # 2차 융통성 (Fallback): DB 부족으로 단원 제한을 넘었으나 빈칸으로 둘 수 없을 때
+    elif fresh:
+        sel = random.choice(fresh)
+        topic = sel.get('topic', '기타')
+        topic_counts[topic] = topic_counts.get(topic, 0) + 1
+        used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
+        return {**sel, "num": q_info['num'], "source": "DB (단원 초과 허용)", "cat": q_info.get('cat', '공통')}
+    
+    # 3차: AI 실시간 생성
     for _ in range(3):
         new_batch = await generate_batch_ai(q_info, size=2)
-        if new_batch and len(new_batch) > 0 and is_valid_question(new_batch[0], q_info['type']): 
-            return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info.get('cat', '공통')}
+        if new_batch and len(new_batch) > 0 and is_valid_question(new_batch[0], q_info['type']):
+            sel = new_batch[0]
+            topic = sel.get('topic', '기타')
+            topic_counts[topic] = topic_counts.get(topic, 0) + 1
+            return {**sel, "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info.get('cat', '공통')}
         await asyncio.sleep(1.5) 
         
     return {
-        "num": q_info.get('num', 0), 
-        "score": q_info.get('score', 3), 
-        "type": q_info.get('type', '객관식'),
-        "cat": q_info.get('cat', '공통'),
-        "question": "서버 응답 지연으로 생성을 실패했습니다.", 
-        "options": [], 
-        "solution": "오류", 
-        "source": "ERROR"
+        "num": q_info.get('num', 0), "score": q_info.get('score', 3), "type": q_info.get('type', '객관식'),
+        "cat": q_info.get('cat', '공통'), "question": "서버 응답 지연으로 생성을 실패했습니다.", "options": [], "solution": "오류", "source": "ERROR"
     }
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     blueprint = get_exam_blueprint(sub_choice, num_choice, score_choice)
     used_ids, used_batch_ids = set(), set()
+    topic_counts = {} # [핵심] 단원(Topic) 분배 장부 초기화
     results = []
-    prog = st.progress(0); status = st.empty()
     
+    prog = st.progress(0); status = st.empty()
     chunk_size = 2 
     for i in range(0, len(blueprint), chunk_size):
         chunk = blueprint[i : i + chunk_size]
-        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 생성 중... (창의성 검수 중)")
-        tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in chunk]
+        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 생성 중... (단원별 분배 검수 중)")
+        
+        # topic_counts 장부를 넘겨서 단원 쏠림을 감시합니다.
+        tasks = [get_safe_q(q, used_ids, used_batch_ids, topic_counts) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
         
@@ -272,9 +283,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
         if len(current_page) == 2:
             pages.append(current_page)
             current_page = []
-            
-    if current_page:
-        pages.append(current_page)
+    if current_page: pages.append(current_page)
 
     for page in pages:
         first_num = page[0].get('num', 0)
@@ -303,9 +312,9 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
         
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가 (수학 영역)</h1></div>{header_html}<div class='question-grid'>{q_chunk}</div></div>"
 
-    return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
+    return p_html, s_html, sum(1 for r in results if r.get('source').startswith('DB'))
 
-# --- 9. 무결점 및 창의성 변형 파밍 엔진 ---
+# --- 9. 무결점 단원 태그(Topic) 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -320,6 +329,7 @@ def run_auto_farmer():
                 creative_twist = get_creative_twist(score)
                 opt_rule = "객관식이므로 options 배열에 5개의 선지 필수." if q_type == '객관식' else "주관식(단답형)이므로 options 배열 비울 것([])."
                 
+                # DB 저장 시 'topic' 필드를 포함하도록 지시
                 prompt = f"""과목:{sub} | 배점:{score} | 유형:{q_type}
 [최우선 필수 지시사항] 
 1. 생성 방식: 완전히 새로운 창작 문항 1개(Seed)를 만들고, 이어서 조건/숫자만 비튼 쌍둥이 유사 문항(Variant) 3개를 작성.
@@ -327,7 +337,7 @@ def run_auto_farmer():
 3. 언어 및 범위: 무조건 한국어. 반드시 '{sub}' 교육과정 내에서 출제.
 4. 유형: {opt_rule}
 5. 형식: 수식 $ $ 필수. 부가 텍스트 절대 금지.
-JSON 배열 형태로 총 4개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}, ...]"""
+JSON 배열 형태로 총 4개 생성: [{{ "topic": "출제 단원명(예: 지수함수, 미분법 등)", "question": "...", "options": [...], "solution": "..." }}, ...]"""
                 
                 res = sync_model.generate_content(
                     prompt, 
@@ -448,7 +458,8 @@ with st.sidebar:
                 st.caption("🗄️ DB 시스템 자가 치유 중...")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중... (다양한 창의적 문항 조판 중)"):
+    with st.spinner("AI 엔진 가동 중... (단원별 분배 및 데이터 조판 중)"):
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
+
