@@ -324,7 +324,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 9. [보안 수정] UI 및 권한 분리 인증 ---
+# --- 9. [보안 수정] UI, 인증 및 로그아웃 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -335,10 +335,12 @@ def send_verification_email(receiver, code):
 
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 
-# 세션 상태 초기화 (verified: 로그인 여부, user_email: 접속자 권한 추적)
+# 세션 상태 초기화
 if 'verified' not in st.session_state: 
     st.session_state.verified = False
     st.session_state.user_email = ""
+if 'mail_sent' not in st.session_state:
+    st.session_state.mail_sent = False
 
 with st.sidebar:
     st.title("🎓 본부 인증")
@@ -347,7 +349,6 @@ with st.sidebar:
     if not st.session_state.verified:
         email_in = st.text_input("이메일 입력")
         
-        # 관리자 이메일 입력 시 패스워드 없이 다이렉트 통과 (기존 로직 유지)
         if email_in == ADMIN_EMAIL:
             if st.button("관리자 로그인"):
                 st.session_state.verified = True
@@ -361,19 +362,27 @@ with st.sidebar:
                     st.session_state.mail_sent = True
                     st.session_state.temp_email = email_in
                     st.success("발송 완료!")
-            if st.session_state.get('mail_sent'):
+            if st.session_state.mail_sent:
                 c_in = st.text_input("6자리 입력")
                 if st.button("확인"):
                     if c_in == st.session_state.auth_code: 
                         st.session_state.verified = True
                         st.session_state.user_email = st.session_state.temp_email
+                        st.session_state.mail_sent = False # 초기화
                         st.rerun()
                         
     # 2. 로그인 완료 후 화면
     else:
         st.success(f"✅ {st.session_state.user_email} 님 로그인됨")
         
-        # [핵심 방어벽] 로그인한 계정이 관리자일 때만 초기화 버튼 노출
+        # [신규 추가] 로그아웃 버튼
+        if st.button("🚪 로그아웃", type="secondary"):
+            st.session_state.verified = False
+            st.session_state.user_email = ""
+            st.session_state.mail_sent = False
+            st.rerun()
+            
+        # 관리자 권한 활성화 (일반 사용자는 절대 볼 수 없음)
         if st.session_state.user_email == ADMIN_EMAIL:
             st.warning("👑 관리자 권한 활성화")
             if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
