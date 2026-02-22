@@ -36,38 +36,39 @@ db, bank_db = get_databases()
 User, QBank = Query(), Query()
 DB_LOCK = threading.Lock()
 
-# --- 3. [수정됨] 텍스트 정제 엔진 (수식 이중 이스케이프 방지) ---
+# --- 3. 텍스트 정제 엔진 ---
 def polish_output(text):
     if not text: return ""
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     text = re.sub(r'\[.*?점\]\s*', '', text)
-    # 8.pdf 오류 원인: \$ 가 화면에 그대로 나오는 현상 방지
-    text = text.replace(r'\$', '$') 
-    text = text.replace('->', r'\to')
+    text = text.replace(r'\$', '$').replace('->', r'\to')
     return text.strip()
 
 def clean_option(text):
     return polish_output(re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip())
 
-# --- 4. [수정됨] 난이도 및 진짜 SVG 가이드 ---
+# --- 4. 난이도 및 SVG 가이드 ---
 def get_pro_guide(score):
     if score == 2:
-        return "[2점 절대 엄수] 무조건 1분 컷 단순 연산(예: 단순 지수/로그, 미분계수). 도형, 그래프, 복합 추론 절대 금지."
+        return "[2점] 1분 컷 단순 연산. 복잡한 추론/도형/그래프 절대 금지. (svg_draw: null 처리)"
     elif score == 3:
-        return "[3점 응용] 개념 2개 결합 또는 교과서 유제 수준."
+        return "[3점] 개념 2개 결합 또는 교과서 유제 수준."
     else:
-        return "[4점 킬러] (가), (나) 조건 제시 필수. 케이스 분류 및 복합 추론이 필요한 최고난도."
+        return "[4점 킬러] (가), (나) 조건 활용. 케이스 분류 필수. 변별력 있는 고난도 문항."
 
 # --- 5. HTML/CSS (인쇄 최적화) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html><html><head><meta charset="utf-8">
-    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
+    <script>
+        window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }} }};
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" id="MathJax-script" async></script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700;800&display=swap');
         * {{ font-family: 'Nanum Myeongjo', serif !important; }}
         body {{ background: #e9ecef; padding: 20px; color: #000; display: flex; flex-direction: column; align-items: center; }}
-        .paper {{ background: white; width: 210mm; min-height: 297mm; padding: 20mm 18mm; margin-bottom: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); }}
+        .paper {{ background: white; width: 210mm; min-height: 297mm; padding: 20mm 18mm; margin-bottom: 30px; box-shadow: 0 10px 30px rgba(0,0,0,0.15); page-break-after: always; }}
         .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 50px; position: relative; }}
         .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: #ddd; }}
         .question-box {{ position: relative; line-height: 2.2; font-size: 11pt; padding-left: 28px; margin-bottom: 45px; text-align: justify; min-height: 120px; }}
@@ -79,35 +80,51 @@ def get_html_template(p_html, s_html):
         @media print {{ 
             .no-print {{ display: none !important; }} 
             body {{ padding: 0; background: white; }} 
-            .paper {{ box-shadow: none; margin: 0; page-break-after: always; }} 
+            .paper {{ box-shadow: none; margin: 0; }} 
         }}
     </style></head>
     <body>
         <div class="no-print" style="margin-bottom: 20px; text-align: center;">
-            <p style="color: #555; font-size: 14px; font-weight: bold;">이 창에서 CTRL+P 또는 CMD+P를 눌러 PDF로 저장하세요.</p>
-            <button style="background:#000; color:#fff; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px;" onclick="window.print()">🖨️ 인쇄하기</button>
+            <button style="background:#000; color:#fff; padding:10px 20px; border:none; border-radius:5px; cursor:pointer; font-size:16px; font-weight:bold;" onclick="window.print()">🖨️ 인쇄하기 (Ctrl+P)</button>
         </div>
         {p_html}
         <div class="paper"><h2 style="text-align:center; border-bottom:2px solid #000; padding-bottom:10px;">[정답 및 해설]</h2>{s_html}</div>
     </body></html>
     """
 
-# --- 6. AI 생성 엔진 ---
+# --- 6. AI 생성 엔진 (JSON/LaTeX 정밀 제어) ---
 async def generate_batch_ai(q_info, size=2):
     model = genai.GenerativeModel('models/gemini-2.0-flash')
     guide = get_pro_guide(q_info['score'])
+    
+    # [핵심 수정] JSON 내에서 백슬래시를 보호하기 위해 \\ 강제 사용 지시
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['topic']} | 배점:{q_info['score']}
 [절대 지시사항] 
-1. 언어: 한국어. {guide}
-2. 도형/그래프 필수 시: 말로 설명하지 말고 무조건 `<svg viewBox="0 0 200 200" ...>` 형태의 완성된 코드를 `svg_draw` 필드에 작성하라.
-3. 수식 기호: 반드시 단일 $ 기호만 사용 (예: $x^2+1$). \\$ 사용 금지.
-4. JSON {size}개 생성:
-[{{ "topic": "{q_info['topic']}", "question": "...", "svg_draw": "<svg...> (없으면 null)", "options": ["선지1",...], "solution": "..." }}]"""
+1. {guide}
+2. 수식 표기법: 수식은 무조건 단일 $ 기호로 감싸세요 (예: $x^2+1$). sqrt() 같은 일반 텍스트 수식은 금지합니다.
+3. [중요] JSON 이스케이프: JSON 배열 내부이므로 LaTeX 기호 사용 시 백슬래시를 반드시 두 번 쓰세요. (예: \\\\ln x, \\\\lim, \\\\frac)
+4. 도형/그래프: 꼭 필요한 경우만 `<svg>` 태그 코드를 `svg_draw`에 작성 (어려우면 null).
+5. 출력: 오직 [{{"topic": "{q_info['topic']}", "question": "...", "svg_draw": null, "options": ["①",...], "solution": "..."}}] 형태의 JSON 배열만 출력. Markdown 코드블록(```json) 금지."""
+    
     try:
-        res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
-        data = json.loads(res.text.strip())
+        res = await model.generate_content_async(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.8))
+        
+        # [핵심 수정] 정규식으로 JSON 배열만 안전하게 추출
+        match = re.search(r'\[.*\]', res.text.strip(), re.DOTALL)
+        if not match: return []
+        
+        data = json.loads(match.group(0))
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": "객관식"} for d in data]
-    except: return []
+    except Exception as e: 
+        return []
+
+# [핵심 수정] 동적 비상 문항(Dynamic Fallback) 딕셔너리
+FALLBACK_BANK = {
+    ("미적분", 4): {"question": "함수 $f(x) = e^x \\sin x$ 에 대하여 구간 $[0, \\pi]$에서 곡선 $y=f(x)$ 의 변곡점의 $x$ 좌표를 $a$ 라 할 때, $\\tan a$ 의 값을 구하시오.", "options": ["-1", "0", "1", "$\\sqrt{2}$", "$\\sqrt{3}$"], "solution": "$f'(x) = e^x(\\sin x + \\cos x)$, $f''(x) = 2e^x \\cos x$ 이다. $f''(x)=0$ 에서 $\\cos x = 0$ 이므로 구간 $[0, \\pi]$ 에서 $x = \\frac{\\pi}{2}$ 이다. 좌우에서 부호가 바뀌므로 $a = \\frac{\\pi}{2}$ 이고, $\\tan(\\frac{\\pi}{2})$ 는 정의되지 않지만 극한적 상황을 묻는 의도 파악이 필요하다. (예비 문항)"},
+    ("미적분", 2): {"question": "$\\lim_{x \\to 0} \\frac{e^{3x}-1}{x}$ 의 값을 구하시오.", "options": ["1", "2", "3", "4", "5"], "solution": "$\\lim_{x \\to 0} \\frac{e^{3x}-1}{3x} \\times 3 = 1 \\times 3 = 3$ 이다. 정답은 3번이다."},
+    ("기하", 4): {"question": "좌표공간에서 구 $S: x^2+y^2+z^2-2x-4y-6z+13=0$ 과 평면 $\\alpha: x+y+z=10$ 이 만나서 생기는 원의 넓이를 구하시오.", "options": ["$\\pi$", "$2\\pi$", "$3\\pi$", "$4\\pi$", "$5\\pi$"], "solution": "구의 중심 $(1, 2, 3)$, 반지름 $r=1$ 이다. 평면까지의 거리를 계산하여 피타고라스 정리를 이용한다."},
+    ("확률과 통계", 4): {"question": "주머니에 $1, 2, 3, 4, 5$가 적힌 구슬이 있다. 3개를 동시에 꺼낼 때, 적힌 수의 합이 짝수일 확률을 구하시오.", "options": ["$\\frac{2}{5}$", "$\\frac{1}{2}$", "$\\frac{3}{5}$", "$\\frac{7}{10}$", "$\\frac{4}{5}$"], "solution": "합이 짝수가 되려면 (짝짝짝) 또는 (홀홀짝) 이어야 한다. 계산하면 $\\frac{1}{2}$ 이다."},
+}
 
 async def get_safe_q(q_info, used_ids, topic_counts, total_num):
     with DB_LOCK:
@@ -121,6 +138,7 @@ async def get_safe_q(q_info, used_ids, topic_counts, total_num):
         used_ids.add(str(sel.doc_id))
         return {**sel, "num": q_info['num'], "source": "DB"}
     
+    # AI 생성 재시도 2회
     for _ in range(2):
         new_batch = await generate_batch_ai(q_info, size=2)
         if new_batch:
@@ -128,8 +146,10 @@ async def get_safe_q(q_info, used_ids, topic_counts, total_num):
             topic_counts[sel['topic']] = topic_counts.get(sel['topic'], 0) + 1
             return {**sel, "num": q_info['num'], "source": "AI", "full_batch": new_batch}
     
-    # 지연 시 Fallback 방어 로직
-    return {"num": q_info['num'], "score": q_info['score'], "question": "서버 부하로 예비 문항이 로드되었습니다. $\\log_2 8 + \\log_3 9$ 의 값을 구하시오.", "options": ["3", "4", "5", "6", "7"], "solution": "$\\log_2 2^3 + \\log_3 3^2 = 3 + 2 = 5$ 이므로 정답은 5이다.", "source": "SAFE", "svg_draw": None}
+    # [핵심 수정] 과목/배점별 맞춤형 예비 문항 로드
+    fallback_data = FALLBACK_BANK.get((q_info['sub'], q_info['score']), {"question": "수식 파싱 오류 방지를 위한 예비 문항입니다. $2+3=5$", "options": ["1", "2", "3", "4", "5"], "solution": "정답은 5."})
+    
+    return {"num": q_info['num'], "score": q_info['score'], "question": f"[예비 문항] {fallback_data['question']}", "options": fallback_data['options'], "solution": fallback_data['solution'], "source": "SAFE", "svg_draw": None}
 
 def safe_save_to_bank(batch):
     def _bg_save():
@@ -163,7 +183,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     prog, status = st.progress(0), st.empty()
     
     for q_info in blueprint:
-        status.text(f"⏳ {q_info['num']}번 조판 및 SVG 렌더링 중...")
+        status.text(f"⏳ {q_info['num']}번 조판 중...")
         res = await get_safe_q(q_info, used_ids, topic_counts, num_choice)
         results.append(res)
         if res.get('source') == "AI" and "full_batch" in res:
@@ -185,7 +205,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     return get_html_template(p_html, s_html), sum(1 for r in results if r.get('source') == "DB")
 
-# --- 7. [수정됨] 백그라운드 파밍 메모리 누수 방지 로직 ---
+# --- 7. 백그라운드 파밍 메모리 누수 방지 로직 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.0-flash')
     while True:
@@ -194,14 +214,17 @@ def run_auto_farmer():
             if cur_len < 10000:
                 sub = random.choice(["미적분", "확률과 통계", "기하", "수학 I", "수학 II"])
                 score = random.choice([2, 3, 4])
-                prompt = f"과목:{sub} | 배점:{score} | [지시] 기준 문항 1개와 변형 3개를 JSON으로 생성. 수식 $$, 도형 필요시 <svg> 직접 작성 필수."
-                res = sync_model.generate_content(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.9, response_mime_type="application/json"))
-                data = json.loads(res.text.strip())
-                with DB_LOCK:
-                    for q in data:
-                        q.update({"batch_id": str(uuid.uuid4()), "sub": sub, "score": score, "type": "객관식"})
-                        if q.get('topic') and q.get('question'): bank_db.insert(q)
-            time.sleep(20) # 부하 조절을 위해 인터벌 증가
+                prompt = f"과목:{sub} | 배점:{score} | [지시] 기준 문항 1개와 변형 3개를 JSON으로 생성. LaTeX 기호는 이스케이프(\\\\) 처리 필수."
+                res = sync_model.generate_content(prompt, safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
+                
+                match = re.search(r'\[.*\]', res.text.strip(), re.DOTALL)
+                if match:
+                    data = json.loads(match.group(0))
+                    with DB_LOCK:
+                        for q in data:
+                            q.update({"batch_id": str(uuid.uuid4()), "sub": sub, "score": score, "type": "객관식"})
+                            if q.get('topic') and q.get('question'): bank_db.insert(q)
+            time.sleep(20)
         except: time.sleep(30)
 
 @st.cache_resource
@@ -210,7 +233,6 @@ def start_global_farmer():
     thread.start()
     return thread
 
-# 앱 기동 시 서버 전체에서 단 1개의 스레드만 실행됨
 start_global_farmer()
 
 # --- 8. UI 및 관리자 메뉴 ---
@@ -234,9 +256,9 @@ with st.sidebar:
             if 'confirm_reset' not in st.session_state: st.session_state.confirm_reset = False
             
             if not st.session_state.confirm_reset:
-                if st.button("🚨 전체 DB 강제 초기화"): st.session_state.confirm_reset = True; st.rerun()
+                if st.button("🚨 에러 난 기존 DB 강제 초기화"): st.session_state.confirm_reset = True; st.rerun()
             else:
-                st.error("⚠️ 정말로 모든 문제를 삭제하시겠습니까?")
+                st.error("⚠️ 오류 데이터들을 삭제하시겠습니까?")
                 if st.button("✔️ 삭제 승인", type="primary"):
                     with DB_LOCK: bank_db.truncate()
                     st.session_state.confirm_reset = False; st.rerun()
@@ -247,7 +269,7 @@ with st.sidebar:
         sub_choice = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
         
         if mode == "맞춤 문항":
-            num_choice = st.slider("문항 수", 2, 20, 4, step=2)
+            num_choice = st.slider("문항 수", 2, 20, 10, step=2)
             score_val = int(st.selectbox("배점 설정", ["2", "3", "4"]))
         else:
             num_choice = 30
@@ -256,16 +278,14 @@ with st.sidebar:
         btn = st.button("🚀 프리미엄 발간 시작", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ 백그라운드 DB 비축량: {len(bank_db)} / 10000")
 
-# --- 9. [수정됨] Iframe 인쇄 잘림 방지 (다운로드 버튼 제공) ---
 if st.session_state.verified and btn:
-    with st.spinner("AI가 SVG 도면을 렌더링하고 수능 규격에 맞춰 조판 중입니다..."):
+    with st.spinner("AI가 수식을 정제하고 수능 규격에 맞춰 조판 중입니다..."):
         try:
             html_out, db_hits = asyncio.run(run_orchestrator(sub_choice, num_choice, score_val))
             st.success(f"✅ 발간 완료! (DB 추출: {db_hits}개 / AI 신규 생성: {num_choice - db_hits}개)")
             
-            # 1. 완벽한 인쇄를 위한 HTML 직접 다운로드 버튼
             st.download_button(
-                label="📥 깔끔한 인쇄용 파일 다운로드 (다운 후 더블클릭하여 인쇄하세요)",
+                label="📥 깔끔한 인쇄용 HTML 다운로드 (다운 후 열어서 인쇄)",
                 data=html_out,
                 file_name=f"2026_수능모의평가_{sub_choice}.html",
                 mime="text/html",
@@ -274,11 +294,10 @@ if st.session_state.verified and btn:
             )
             
             st.info("👇 아래는 미리보기 화면입니다. 완벽한 A4 출력을 원하시면 위의 다운로드 버튼을 이용해 주세요.")
-            
-            # 2. 웹상에서의 미리보기 화면 (스크롤 제공)
             st.components.v1.html(html_out, height=800, scrolling=True)
             
         except Exception as e: 
             st.error(f"❌ 발간 중 오류가 발생했습니다: {e}")
+
 
 
