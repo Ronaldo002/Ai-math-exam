@@ -9,6 +9,7 @@ import time
 import threading
 import re
 import uuid
+import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -30,10 +31,22 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 ---
+# --- 2. DB 및 전역 락 (자가 치유 로직 탑재) ---
 @st.cache_resource
 def get_databases():
-    return TinyDB('user_registry.json'), TinyDB('question_bank.json')
+    try:
+        # 정상적으로 읽히는지 테스트
+        u_db = TinyDB('user_registry.json')
+        q_db = TinyDB('question_bank.json')
+        _ = len(q_db) 
+        return u_db, q_db
+    except Exception:
+        # JSON 파일이 깨졌을 경우(JSONDecodeError 등) 기존 파일 강제 삭제 후 새 파일 생성
+        if os.path.exists('question_bank.json'):
+            os.remove('question_bank.json')
+        if os.path.exists('user_registry.json'):
+            os.remove('user_registry.json')
+        return TinyDB('user_registry.json'), TinyDB('question_bank.json')
 
 db, bank_db = get_databases()
 User, QBank = Query(), Query()
@@ -324,7 +337,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 9. [보안 수정] UI, 인증 및 로그아웃 ---
+# --- 9. UI, 인증 및 로그아웃 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -335,7 +348,6 @@ def send_verification_email(receiver, code):
 
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 
-# 세션 상태 초기화
 if 'verified' not in st.session_state: 
     st.session_state.verified = False
     st.session_state.user_email = ""
@@ -345,7 +357,6 @@ if 'mail_sent' not in st.session_state:
 with st.sidebar:
     st.title("🎓 본부 인증")
     
-    # 1. 로그인 전 화면
     if not st.session_state.verified:
         email_in = st.text_input("이메일 입력")
         
@@ -368,21 +379,18 @@ with st.sidebar:
                     if c_in == st.session_state.auth_code: 
                         st.session_state.verified = True
                         st.session_state.user_email = st.session_state.temp_email
-                        st.session_state.mail_sent = False # 초기화
+                        st.session_state.mail_sent = False 
                         st.rerun()
                         
-    # 2. 로그인 완료 후 화면
     else:
         st.success(f"✅ {st.session_state.user_email} 님 로그인됨")
         
-        # [신규 추가] 로그아웃 버튼
         if st.button("🚪 로그아웃", type="secondary"):
             st.session_state.verified = False
             st.session_state.user_email = ""
             st.session_state.mail_sent = False
             st.rerun()
             
-        # 관리자 권한 활성화 (일반 사용자는 절대 볼 수 없음)
         if st.session_state.user_email == ADMIN_EMAIL:
             st.warning("👑 관리자 권한 활성화")
             if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
@@ -398,7 +406,11 @@ with st.sidebar:
         score = int(st.selectbox("난이도 설정", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
         
-        with DB_LOCK: st.caption(f"🗄️ 무결점 DB 축적량: {len(bank_db)} / 10000")
+        with DB_LOCK: 
+            try:
+                st.caption(f"🗄️ 무결점 DB 축적량: {len(bank_db)} / 10000")
+            except:
+                st.caption("🗄️ DB 시스템 자가 치유 중...")
 
 if st.session_state.verified and btn:
     with st.spinner("AI 엔진 가동 중... (무결점 데이터 검증 및 조판 중)"):
