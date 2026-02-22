@@ -21,10 +21,9 @@ else:
 
 ADMIN_EMAIL = "pgh001002@gmail.com"
 
-# --- 2. [에러 방지] DB 및 전역 락 설정 ---
+# --- 2. DB 및 전역 락 설정 (중복 ID 에러 방지) ---
 @st.cache_resource
 def get_databases():
-    # 에러 방지를 위해 테이블 분리 및 캐싱
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
 
 db, bank_db = get_databases()
@@ -32,130 +31,125 @@ User, QBank = Query(), Query()
 
 @st.cache_resource
 def get_global_lock():
-    # 루프 충돌 방지를 위해 threading.Lock 사용
     return threading.Lock()
 
 DB_LOCK = get_global_lock()
 
 def safe_db_insert(data):
-    """중복 ID 에러(image_10743d) 방지용 안전 삽입 함수"""
+    """ValueError: Document with ID ... already exists 에러 원천 차단"""
     with DB_LOCK:
-        # 데이터에 고유 지문(hash)이 이미 있는지 확인하여 중복 저장을 원천 차단
         q_text = data.get("question", "")
-        exists = bank_db.search(QBank.question == q_text)
-        if not exists:
+        # 지문 내용으로 중복 체크
+        if not bank_db.search(QBank.question == q_text):
             return bank_db.insert(data)
         return None
 
 def safe_db_search(query):
-    with DB_LOCK:
-        return bank_db.search(query)
+    with DB_LOCK: return bank_db.search(query)
 
 def get_db_len():
-    with DB_LOCK:
-        return len(bank_db)
+    with DB_LOCK: return len(bank_db)
 
-# --- 3. [업데이트] 수식 정밀 교정기 (Polisher) ---
+# --- 3. 텍스트 정제 및 수식 보정 엔진 ---
 def polish_math(text):
     if not text: return ""
-    # log, 수열 첨자, 지수 기호가 MathJax에서 자연스럽게 나오도록 LaTeX 보정
+    # 불필요한 메타데이터(과목|단원|배점) 문구 삭제
+    text = re.sub(r'^(과목|단원|배점|유형):.*?\n', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[.*?점\]$', '', text.strip()) # 중복 배점 표시 방지
+    
+    # 수식 기호 정규화
     text = re.sub(r'log_([a-zA-Z0-9{}]+)', r'\\log_{\1}', text)
     text = re.sub(r'([a-zA-Z])_([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1_{\2}', text)
     text = re.sub(r'([a-zA-Z0-9])\^([a-zA-Z0-9])(?![a-zA-Z0-9{}])', r'\1^{\2}', text)
-    text = text.replace('Σ', r'\sum').replace('∫', r'\int').replace('lim', r'\lim')
-    return text
+    text = text.replace('Σ', r'\sum').replace('∫', r'\int')
+    return text.strip()
 
 def clean_option(text):
-    # 선지 앞 번호 찌꺼기 제거 (숫자 짤림 방지 정규식)
-    return re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
+    # 분수가 포함된 선지 정제 및 기호 제거
+    clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
+    return clean
 
-# --- 4. 수능 블루프린트 (30문항 규격) ---
+# --- 4. 수능 블루프린트 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
         for i in range(1, 23):
-            if i in [1, 2]: score, diff, domain = 2, "쉬움", "지수로그/극한 기본"
-            elif i in [15, 21, 22]: score, diff, domain = 4, "킬러", "심화 추론"
-            else: score, diff, domain = 4 if i > 8 else 3, "보통", "수학 I, II"
-            blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": "객관식" if i <= 15 else "단답형", "domain": domain})
+            if i in [1, 2]: score, diff, dom = 2, "쉬움", "기초 연산"
+            elif i in [15, 21, 22]: score, diff, dom = 4, "킬러", "심화 추론"
+            else: score, diff, dom = 4 if i > 8 else 3, "보통", "수학 I, II"
+            blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": "객관식" if i <= 15 else "단답형", "domain": dom})
         for i in range(23, 31):
-            if i in [23, 24]: score, diff, domain = 2, "쉬움", f"{choice_sub} 기초"
-            elif i in [29, 30]: score, diff, domain = 4, "최종 킬러", f"{choice_sub} 최고난도"
-            else: score, diff, domain = 3, "보통", f"{choice_sub} 핵심"
-            blueprint.append({"num": i, "sub": choice_sub, "diff": diff, "score": score, "type": "객관식" if i <= 28 else "단답형", "domain": domain})
+            if i in [23, 24]: score, diff, dom = 2, "쉬움", f"{choice_sub} 기초"
+            elif i in [29, 30]: score, diff, dom = 4, "킬러", f"{choice_sub} 고난도"
+            else: score, diff, dom = 3, "보통", f"{choice_sub} 응용"
+            blueprint.append({"num": i, "sub": choice_sub, "diff": diff, "score": score, "type": "객관식" if i <= 28 else "단답형", "domain": dom})
     else:
         for i in range(1, total_num + 1):
             blueprint.append({"num": i, "sub": choice_sub, "diff": "보통", "score": custom_score or 3, "type": "객관식", "domain": f"{choice_sub} 전범위"})
     return blueprint
 
-# --- 5. HTML 템플릿 (SVG 도형 지원) ---
+# --- 5. HTML 템플릿 (네모 박스 제거 디자인) ---
 def get_html_template(p_html, s_html, subject):
     return f"""
     <!DOCTYPE html>
     <html lang="ko">
     <head>
         <meta charset="utf-8">
-        <script>window.MathJax = {{ tex: {{ inlineMath: [['$', '$']] }} }};</script>
+        <script>window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }} }};</script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700;800&display=swap');
-            * {{ font-family: 'Nanum Myeongjo', serif; }}
-            body {{ background: #f0f2f6; margin: 0; }}
+            * {{ font-family: 'Nanum Myeongjo', serif !important; }}
+            body {{ background: #f0f2f6; margin: 0; color: #000; }}
             .paper-container {{ display: flex; flex-direction: column; align-items: center; padding: 20px 0; }}
             .paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); position: relative; }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; margin-bottom: 35px; }}
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 50px; min-height: 230mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            .question-box {{ position: relative; line-height: 2.0; font-size: 11pt; padding-left: 35px; margin-bottom: 40px; }}
-            .q-num {{ position: absolute; left: 0; top: 3px; font-weight: 800; border: 2px solid #000; width: 24px; text-align: center; }}
-            .options-container {{ margin-top: 25px; display: flex; justify-content: space-between; font-size: 10.5pt; }}
-            .condition-box {{ border: 1.5px solid #000; padding: 10px; margin: 10px 0; background: #fafafa; font-weight: 700; }}
-            .svg-container {{ text-align: center; margin: 15px 0; }}
+            .question-box {{ position: relative; line-height: 2.1; font-size: 11pt; padding-left: 30px; margin-bottom: 45px; text-align: justify; }}
+            /* 문항 표시 네모 제거 */
+            .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 12pt; }}
+            .options-container {{ margin-top: 30px; display: flex; justify-content: space-between; font-size: 10.5pt; }}
+            .condition-box {{ border: 1.5px solid #000; padding: 12px; margin: 15px 0; background: #fafafa; font-weight: 700; }}
             .sol-item {{ margin-bottom: 35px; border-bottom: 1px dashed #eee; padding-bottom: 15px; }}
-            @media print {{ @page {{ size: A4; margin: 0; }} .paper {{ box-shadow: none; margin: 0; page-break-after: always; }} }}
+            mjx-container {{ font-size: 110% !important; }} /* 분수 가독성 향상 */
         </style>
     </head>
-    <body><div class="paper-container">{p_html}<div class="paper"><h2 style="text-align:center;">[정답 및 해설]</h2>{s_html}</div></div></body>
+    <body><div class="paper-container">{p_html}<div class="paper"><h2>[정답 및 해설]</h2>{s_html}</div></div></body>
     </html>
     """
 
-# --- 6. AI 생성 엔진 (배치 & 스펙트럼) ---
+# --- 6. AI 생성 및 오케스트레이터 ---
 async def generate_batch_ai(q_info, size=5):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     batch_id = str(uuid.uuid4())
+    # 선지 분수 관련 지시 강화
     prompt = f"""과목:{q_info['sub']} | 단원:{q_info['domain']} | 배점:{q_info['score']}
-[규칙] 1. 수식은 무조건 $ $ 사용. 2. 조건 박스는 <div class='condition-box'>. 3. 도형 필요시 <svg>. 4. 선지는 'options' 배열에 5개.
-오직 JSON 배열로 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
+[필수] 1. 수식은 $ $ 필수. 선지 내 분수는 반드시 $\\frac{{a}}{{b}}$ 형태 사용.
+2. 불필요한 메타데이터 문구(과목, 단원 등)는 출력 지문에 절대 포함 금지.
+3. 오직 JSON 배열로 {size}개 생성: [{{ "question": "...", "options": ["..."], "solution": "..." }}]"""
     try:
         res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
-        data = json.loads(res.text.strip())
-        return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "domain": q_info['domain'], "score": q_info['score'], "type": q_info['type']} for d in data]
+        return [{**d, "batch_id": batch_id, "sub": q_info['sub'], "domain": q_info['domain'], "score": q_info['score'], "type": q_info['type']} for d in json.loads(res.text.strip())]
     except: return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
-    # DB 검색 (과목/단원/배점 일치)
     available = safe_db_search((QBank.sub == q_info['sub']) & (QBank.domain == q_info['domain']) & (QBank.score == q_info['score']))
     fresh = [q for q in available if str(q.doc_id) not in used_ids and q.get('batch_id') not in used_batch_ids]
-    
     if fresh:
         sel = random.choice(fresh)
-        used_ids.add(str(sel.doc_id))
-        if 'batch_id' in sel: used_batch_ids.add(sel['batch_id'])
+        used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB"}
-    
-    # 신규 생성
     new_batch = await generate_batch_ai(q_info)
     if new_batch:
-        first_res = None
+        res = None
         for idx, q in enumerate(new_batch):
-            doc_id = safe_db_insert(q) # 안전 삽입
-            if idx == 0: 
-                first_res = {**q, "num": q_info['num'], "doc_id": str(doc_id), "source": "AI"}
-        if first_res:
-            used_ids.add(first_res['doc_id'])
-            if 'batch_id' in first_res: used_batch_ids.add(first_res['batch_id'])
-            return first_res
-    return {"num": q_info['num'], "question": "지연 발생.. 재시도 부탁드립니다.", "options": [], "solution": "오류"}
+            doc_id = safe_db_insert(q)
+            if idx == 0: res = {**q, "num": q_info['num'], "doc_id": str(doc_id or "tmp"), "source": "AI"}
+        if res:
+            used_ids.add(res['doc_id']); used_batch_ids.add(res.get('batch_id'))
+            return res
+    return {"num": q_info['num'], "question": "지연 발생.. 재시도 해주세요.", "options": [], "solution": "오류"}
 
 async def run_orchestrator(choice_sub, num, score_val=None):
     blueprint = get_exam_blueprint(choice_sub, num, score_val)
@@ -176,14 +170,12 @@ async def run_orchestrator(choice_sub, num, score_val=None):
             if item.get('type') == '객관식' and opts:
                 spans = "".join([f"<span>{chr(9312+j)} {clean_option(o)}</span>" for j, o in enumerate(opts[:5])])
                 opt_html = f"<div class='options-container'>{spans}</div>"
-            
             q_cont += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
-            s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_math(item.get('solution',''))}</div>"
+            s_html += f"<div class='sol-item'><b>{item['num']}번:</b> {polish_math(item.get('solution',''))}</div>"
         p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1><h3>수학 영역 ({choice_sub})</h3></div><div class='question-grid'>{q_cont}</div></div>"
-    
     return p_html, s_html, time.time()-start_time, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 7. [부활] 백그라운드 DB 무한 생성기 ---
+# --- 7. 백그라운드 무한 생성 엔진 ---
 def run_auto_farmer():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -193,10 +185,10 @@ def run_auto_farmer():
                 sub = random.choice(["수학 I, II", "미적분", "확률과 통계", "기하"])
                 score = random.choice([2, 3, 4])
                 q_info = {"sub": sub, "domain": f"{sub} 핵심 랜덤", "score": score, "type": "객관식" if score < 4 else "단답형"}
-                batch = loop.run_until_complete(generate_batch_ai(q_info, size=10))
+                batch = loop.run_until_complete(generate_batch_ai(q_info, size=8))
                 for q in batch: safe_db_insert(q)
-            time.sleep(30) # 과부하 방지를 위한 휴식
-        except: time.sleep(30)
+            time.sleep(40)
+        except: time.sleep(40)
 
 if 'farmer' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
@@ -214,15 +206,13 @@ with st.sidebar:
         st.divider()
         mode = st.radio("모드", ["맞춤 문항", "30문항 풀세트"])
         sub = st.selectbox("과목", ["미적분", "확률과 통계", "기하"])
-        num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2) # 30개로 복구
+        num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
         score = int(st.selectbox("배점", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
         st.caption(f"🗄️ DB 축적량: {get_db_len()} / 10000")
 
-if st.session_state.v:
-    if 'btn' in locals() and btn:
-        with st.spinner("DB 검색 및 렌더링 중..."):
-            p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score))
-            st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
-            st.components.v1.html(get_html_template(p, s, sub), height=1200, scrolling=True)
-
+if st.session_state.v and 'btn' in locals() and btn:
+    with st.spinner("서버 부하 분산 및 정밀 렌더링 중..."):
+        p, s, elap, hits = asyncio.run(run_orchestrator(sub, num, score))
+        st.success(f"✅ 완료! ({elap:.1f}초 | DB사용: {hits}개)")
+        st.components.v1.html(get_html_template(p, s, sub), height=1200, scrolling=True)
