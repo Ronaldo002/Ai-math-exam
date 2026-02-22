@@ -13,7 +13,7 @@ import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# --- 1. 환경 설정 및 API 보안 해제 ---
+# --- 1. 환경 설정 및 API 보안 ---
 if "PAID_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["PAID_API_KEY"])
 else:
@@ -31,7 +31,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 (자가 치유) ---
+# --- 2. DB 및 전역 락 ---
 @st.cache_resource
 def get_databases():
     try:
@@ -53,20 +53,15 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 초정밀 텍스트 정제 엔진 (벡터/수식 최적화) ---
+# --- 3. 텍스트 정제 엔진 ---
 def polish_output(text):
     if not text: return ""
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     text = re.sub(r'^Step\s?\d:.*?\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[.*?점\]\s*', '', text)
-    
-    math_tokens = [
-        'vec', 'cdot', 'frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 
-        'to', 'infty', 'sin', 'cos', 'tan', 'sum', 'int', 'alpha', 'beta', 'mu', 'sigma'
-    ]
+    math_tokens = ['vec', 'cdot', 'frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 'to', 'infty', 'sin', 'cos', 'tan', 'sum', 'int', 'alpha', 'beta', 'mu', 'sigma']
     for token in math_tokens:
         text = re.sub(rf'(?<!\\)\b{token}\b', rf'\\{token}', text)
-    
     text = text.replace('->', r'\to')
     return text.strip()
 
@@ -74,7 +69,7 @@ def clean_option(text):
     clean = re.sub(r'^([①-⑤]|[1-5][\.\)])\s*', '', str(text)).strip()
     return polish_output(clean)
 
-# --- 4. 무결점 검수 엔진 ---
+# --- 4. 무결점 검수 ---
 def is_valid_question(q, expected_type):
     if not q.get('topic') or not str(q.get('topic')).strip(): return False
     if not q.get('question') or not str(q.get('question')).strip(): return False
@@ -97,48 +92,63 @@ def safe_save_to_bank(batch, expected_type):
                     except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 5. 수능 표준 배치 설계 ---
+# --- 5. [개선] 2026 수능 비율형 블루프린트 설계 ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
+    
+    m1_topics = ["지수함수와 로그함수", "삼각함수", "수열"]
+    m2_topics = ["함수의 극한과 연속", "다항함수의 미분법", "다항함수의 적분법"]
+    choice_map = {
+        "미적분": ["수열의 극한", "미분법", "적분법"],
+        "확률과 통계": ["경우의 수", "확률", "통계"],
+        "기하": ["이차곡선", "평면벡터", "공간도형과 공간좌표"]
+    }
+    
     if total_num == 30:
-        for i in range(1, 16): 
+        # 1~15번 (공통 객관식)
+        for i in range(1, 16):
+            sub = "수학 I" if i % 2 != 0 else "수학 II"
+            topic = m1_topics[(i//2) % 3] if sub == "수학 I" else m2_topics[(i//2) % 3]
             score = 2 if i <= 3 else 4 if i in [9,10,11,12,13,14,15] else 3
-            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식", "cat": "공통"})
+            blueprint.append({"num": i, "sub": sub, "topic": topic, "score": score, "type": "객관식"})
+        # 16~22번 (공통 주관식)
         for i in range(16, 23):
+            sub = "수학 II" if i % 2 == 0 else "수학 I"
+            topic = m2_topics[i % 3] if sub == "수학 II" else m1_topics[i % 3]
             score = 4 if i in [21, 22] else 3
-            blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "주관식", "cat": "공통"})
-        for i in range(23, 29): 
-            score = 2 if i == 23 else 4 if i == 28 else 3
-            blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식", "cat": "선택"})
-        for i in range(29, 31): 
-            blueprint.append({"num": i, "sub": choice_sub, "score": 4, "type": "주관식", "cat": "선택"})
+            blueprint.append({"num": i, "sub": sub, "topic": topic, "score": score, "type": "주관식"})
+        # 23~30번 (선택과목)
+        for i in range(23, 31):
+            topics = choice_map[choice_sub]
+            topic = topics[(i-23) % 3]
+            score = 2 if i == 23 else 4 if i in [28, 29, 30] else 3
+            q_type = "객관식" if i <= 28 else "주관식"
+            blueprint.append({"num": i, "sub": choice_sub, "topic": topic, "score": score, "type": q_type})
     else:
+        # 맞춤 문항: 선택한 과목의 단원들을 비율에 맞춰 순차 배분
+        topics = choice_map.get(choice_sub, ["수학 I", "수학 II"]) # 기본값 대응
         for i in range(1, total_num + 1):
-            blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
+            topic = topics[(i-1) % len(topics)]
+            blueprint.append({"num": i, "sub": choice_sub, "topic": topic, "score": custom_score or 3, "type": "객관식"})
+            
     return blueprint
 
-# --- 6. HTML/CSS 템플릿 ---
+# --- 6. HTML 템플릿 ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
     <html lang="ko">
     <head>
         <meta charset="utf-8">
-        <script>
-            window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }} }};
-        </script>
+        <script>window.MathJax = {{ tex: {{ inlineMath: [['$', '$']], displayMath: [['$$', '$$']] }} }};</script>
         <script id="MathJax-script" async src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Nanum+Myeongjo:wght@400;700;800&display=swap');
             * {{ font-family: 'Nanum Myeongjo', serif !important; }}
             body {{ background: #f0f2f6; margin: 0; padding: 20px; color: #000; }}
-            .no-print {{ text-align: center; margin-bottom: 20px; }}
-            .btn-download {{ background: #2e7d32; color: white; padding: 12px 24px; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; font-weight: bold; }}
             .paper-container {{ display: flex; flex-direction: column; align-items: center; }}
             .paper {{ background: white; width: 210mm; height: 297mm; padding: 20mm 18mm; margin-bottom: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); position: relative; page-break-after: always; overflow: hidden; }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; margin-bottom: 25px; padding-bottom: 10px; }}
-            .cat-header-container {{ width: 100%; text-align: left; margin-bottom: 20px; }}
-            .cat-header {{ font-size: 14pt; font-weight: 800; border: 2.5px solid #000; display: inline-block; padding: 6px 20px; background-color: #fff; }}
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; height: 210mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
             .question-box {{ position: relative; line-height: 2.6; font-size: 11.5pt; padding-left: 30px; margin-bottom: 60px; text-align: justify; }}
@@ -146,41 +156,31 @@ def get_html_template(p_html, s_html):
             .options-container {{ margin-top: 30px; display: flex; flex-wrap: wrap; gap: 15px 5px; font-size: 11pt; }}
             .options-container span {{ flex: 1 1 18%; min-width: 140px; white-space: nowrap; }}
             .solution-paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-top: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); }}
-            .sol-item {{ margin-bottom: 25px; border-bottom: 1px dashed #eee; padding-bottom: 15px; }}
             @media print {{ .no-print {{ display: none; }} body {{ padding: 0; }} .paper, .solution-paper {{ box-shadow: none; margin: 0; }} }}
         </style>
     </head>
     <body>
-        <div class="no-print"><button class="btn-download" onclick="window.print()">🖨️ PDF 다운로드 / 인쇄</button></div>
+        <div class="no-print" style="text-align:center; margin-bottom:20px;">
+            <button style="background:#2e7d32; color:white; padding:12px 24px; border:none; border-radius:5px; cursor:pointer; font-weight:bold;" onclick="window.print()">🖨️ PDF 다운로드 / 인쇄</button>
+        </div>
         <div class="paper-container">{p_html}<div class="solution-paper"><h2 style="text-align:center;">[정답 및 해설]</h2>{s_html}</div></div>
     </body>
     </html>
     """
 
-# --- 7. 전 과목 다이내믹 창의성 룰렛 ---
+# --- 7. 창의성 룰렛 ---
 def get_universal_twist(sub, score):
-    if sub == "확률과 통계":
-        return random.choice(["🚫 주머니/상자 금지", "📊 실생활 통계", "🧩 조건 추론(함수의 개수)"])
-    elif sub == "미적분":
-        return random.choice(["📈 초월함수 그래프 추론", "📐 급수 기하 활용", "🔄 치환/부분적분 응용"])
-    elif sub == "수학 I, II":
-        return random.choice(["🔢 수열 귀납적 추론", "📡 삼각함수 주기성 모델링", "🔍 함수의 연속성 심화"])
-    elif sub == "기하":
-        return random.choice(["📐 벡터 내적 기하 의미", "🔄 이차곡선 정의 활용", "📍 공간도형 정사영"])
+    if sub == "확률과 통계": return random.choice(["🚫 주머니 금지", "📊 실생활 통계", "🧩 조건 추론"])
+    elif sub == "미적분": return random.choice(["📈 초월함수 그래프 추론", "📐 급수 기하 활용", "🔄 치환/부분적분 응용"])
+    elif sub == "수학 I" or sub == "수학 II": return random.choice(["🔢 수열 귀납적 추론", "🔍 함수의 연속성 심화"])
+    elif sub == "기하": return random.choice(["📐 벡터 내적 기하 의미", "🔄 이차곡선 정의 활용"])
     return "[기초/응용] 표준 유형 융합."
 
-# --- 8. 프롬프트 및 메인 엔진 ---
+# --- 8. 생성 엔진 ---
 def build_strict_prompt(q_info, size):
     creative_twist = get_universal_twist(q_info['sub'], q_info['score'])
-    opt_rule = "객관식: 5개 선지 필수." if q_info['type'] == '객관식' else "주관식: options 비움."
-
-    prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
-[지시]
-1. 한국어. '{q_info['sub']}' 범위 엄수.
-2. 💡 다양성: {creative_twist}
-3. 유형: {opt_rule}
-4. 형식: 수식 $ $ 필수. 벡터는 \\vec{{a}} 형식.
-5. JSON 배열 {size}개 생성: [{{ "topic": "출제 단원명", "question": "...", "options": [...], "solution": "..." }}]"""
+    prompt = f"""과목:{q_info['sub']} | 단원:{q_info['topic']} | 배점:{q_info['score']} | 유형:{q_info['type']}
+[지시] 1.한국어 2.다양성: {creative_twist} 3.JSON {size}개 생성: [{{ "topic": "{q_info['topic']}", "question": "...", "options": [...], "solution": "..." }}]"""
     return prompt
 
 async def generate_batch_ai(q_info, size=2): 
@@ -191,23 +191,20 @@ async def generate_batch_ai(q_info, size=2):
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
     except: return []
 
-async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts):
+async def get_safe_q(q_info, used_ids, used_batch_ids, topic_counts, total_num):
     with DB_LOCK:
-        available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.score == q_info['score']) & (QBank.type == q_info['type']))
+        available = bank_db.search((QBank.sub == q_info['sub']) & (QBank.topic == q_info['topic']) & (QBank.score == q_info['score']) & (QBank.type == q_info['type']))
     
-    # 전 과목 2문항 쿼터제
+    # [핵심] 가변 쿼터제: 전체 문항 수에 따라 단원당 허용 개수를 유동적으로 조절
+    quota_limit = max(2, (total_num // 3) + 1)
     fresh = [q for q in available if str(q.doc_id) not in used_ids and q.get('batch_id') not in used_batch_ids]
-    strict_fresh = [q for q in fresh if topic_counts.get(q.get('topic', '기타'), 0) < 2]
+    strict_fresh = [q for q in fresh if topic_counts.get(q.get('topic', '기타'), 0) < quota_limit]
     
     if strict_fresh:
         sel = random.choice(strict_fresh)
         topic_counts[sel.get('topic', '기타')] = topic_counts.get(sel.get('topic', '기타'), 0) + 1
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
         return {**sel, "num": q_info['num'], "source": "DB"}
-    elif fresh:
-        sel = random.choice(fresh)
-        used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
-        return {**sel, "num": q_info['num'], "source": "DB+"}
     
     new_batch = await generate_batch_ai(q_info, size=2)
     if new_batch:
@@ -223,15 +220,14 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     for i in range(0, len(blueprint), 2):
         chunk = blueprint[i : i + 2]
-        status.text(f"⏳ {i+1}번 ~ {min(i+2, 30)}번 유형별 균형 조판 중...")
-        tasks = [get_safe_q(q, used_ids, used_batch_ids, topic_counts) for q in chunk]
+        status.text(f"⏳ {i+1}번 ~ {min(i+2, num_choice)}번 유형별 황금 비율 조판 중...")
+        tasks = [get_safe_q(q, used_ids, used_batch_ids, topic_counts, num_choice) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
         all_new = [r['full_batch'] for r in chunk_res if r.get('source') == "AI" and "full_batch" in r]
         if all_new: safe_save_to_bank([item for sublist in all_new for item in sublist], chunk[0]['type'])
         prog.progress(min((i + 2) / len(blueprint), 1.0))
         await asyncio.sleep(0.8)
-    status.empty(); prog.empty()
     
     results.sort(key=lambda x: x.get('num', 999))
     p_html, s_html = "" , ""
@@ -261,16 +257,17 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     return get_html_template(p_html, s_html), sum(1 for r in results if r.get('source').startswith('DB'))
 
-# --- 9. 백그라운드 파밍 엔진 ---
+# --- 9. 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
         try:
             with DB_LOCK: cur_len = len(bank_db)
             if cur_len < 10000:
-                sub = random.choice(["수학 I, II", "미적분", "확률과 통계", "기하"])
-                score, q_type = random.choice([2, 3, 4]), random.choice(["객관식", "주관식"])
-                res = sync_model.generate_content(build_strict_prompt({"sub": sub, "score": score, "type": q_type}, size=4), safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
+                sub = random.choice(["수학 I", "수학 II", "미적분", "확률과 통계", "기하"])
+                topics = {"수학 I": ["지수함수와 로그함수", "삼각함수", "수열"], "수학 II": ["함수의 극한과 연속", "다항함수의 미분법", "다항함수의 적분법"], "미적분": ["수열의 극한", "미분법", "적분법"], "확률과 통계": ["경우의 수", "확률", "통계"], "기하": ["이차곡선", "평면벡터", "공간도형과 공간좌표"]}[sub]
+                score, q_type, topic = random.choice([2, 3, 4]), random.choice(["객관식", "주관식"]), random.choice(topics)
+                res = sync_model.generate_content(build_strict_prompt({"sub": sub, "topic": topic, "score": score, "type": q_type}, size=4), safety_settings=SAFETY_SETTINGS, generation_config=genai.types.GenerationConfig(temperature=0.88, response_mime_type="application/json"))
                 data = json.loads(re.search(r'\[.*\]', res.text.strip(), re.DOTALL).group(0))
                 with DB_LOCK:
                     for q in data:
@@ -284,7 +281,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 10. UI 및 인증 ---
+# --- 10. UI ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 if 'verified' not in st.session_state: st.session_state.verified, st.session_state.user_email = False, ""
 
@@ -297,29 +294,18 @@ with st.sidebar:
     else:
         st.success(f"✅ {st.session_state.user_email}")
         if st.button("🚪 로그아웃"): st.session_state.verified = False; st.rerun()
-        if st.session_state.user_email == ADMIN_EMAIL:
-            if st.button("🚨 전체 DB 초기화"): st.session_state.confirm_all = True
-            if st.session_state.get('confirm_all'):
-                if st.button("✔️ 전체 삭제 승인", type="primary"):
-                    with DB_LOCK: bank_db.truncate()
-                    st.session_state.confirm_all = False; st.rerun()
-                if st.button("❌ 취소"): st.session_state.confirm_all = False; st.rerun()
-
+        if st.session_state.user_email == ADMIN_EMAIL and st.button("🚨 전체 DB 초기화"):
+             with DB_LOCK: bank_db.truncate(); st.rerun()
         st.divider()
         mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
         sub = st.selectbox("선택과목", ["확률과 통계", "미적분", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 10, step=2)
-        
-        # [복구] 난이도 설정 슬롯
-        score_val = None
-        if mode == "맞춤 문항":
-            score_val = int(st.selectbox("난이도 설정 (배점)", ["2", "3", "4"]))
-            
+        score_val = int(st.selectbox("난이도 설정 (배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
         btn = st.button("🚀 발간 시작", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ 무결점 DB: {len(bank_db)}")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중..."):
+    with st.spinner("비율 최적화 조판 중..."):
         html_out, hits = asyncio.run(run_orchestrator(sub, num, score_val))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(html_out, height=1200, scrolling=True)
