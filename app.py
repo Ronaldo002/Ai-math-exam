@@ -31,7 +31,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 (자가 치유 로직) ---
+# --- 2. DB 및 전역 락 (자가 치유) ---
 @st.cache_resource
 def get_databases():
     try:
@@ -56,7 +56,6 @@ DB_LOCK = get_global_lock()
 # --- 3. [개선] 기하/벡터 특화 텍스트 정제 엔진 ---
 def polish_output(text):
     if not text: return ""
-    # 불필요한 레이블 제거
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학\s?[I|II|1|2]|Step\s?\d):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
     text = re.sub(r'^Step\s?\d:.*?\n', '', text, flags=re.IGNORECASE)
     text = re.sub(r'\[.*?점\]\s*', '', text)
@@ -69,7 +68,6 @@ def polish_output(text):
     for token in math_tokens:
         text = re.sub(rf'(?<!\\)\b{token}\b', rf'\\{token}', text)
     
-    # 화살표 및 기호 치환
     text = text.replace('->', r'\to')
     return text.strip()
 
@@ -120,7 +118,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 6. [개선] HTML/CSS 템플릿 (벡터 렌더링 최적화) ---
+# --- 6. [해결] HTML/CSS 템플릿 (재귀 에러 제거) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -131,10 +129,7 @@ def get_html_template(p_html, s_html):
             window.MathJax = {{
                 tex: {{
                     inlineMath: [['$', '$']],
-                    displayMath: [['$$', '$$']],
-                    macros: {{
-                        vec: ["\\\\vec{{#1}}", 1]
-                    }}
+                    displayMath: [['$$', '$$']]
                 }}
             }};
         </script>
@@ -168,13 +163,13 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 7. 다이내믹 창의성 룰렛 (확통 루즈함 방지 포함) ---
+# --- 7. 다이내믹 창의성 룰렛 ---
 def get_creative_twist(sub, score):
     if sub == "확률과 통계":
         return random.choice([
             "🚫 금지: '주머니/공/상자' 상황 절대 사용 금지.",
             "🎨 시각화: 확률분포표 또는 정규분포 곡선 그래프를 반드시 해석하는 문제.",
-            "📊 실생활: 기후 데이터, 투표 결과, 생산 공정 불량률 등 실제 통계 상황 설정.",
+            "📊 실생활: 기후 데이터, 투표 결과 등 실제 통계 상황 설정.",
             "🧩 조건: (가), (나) 조건을 활용한 함수의 개수 추론 유형."
         ])
     if sub == "기하":
@@ -275,7 +270,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     
     return get_html_template(p_html, s_html), sum(1 for r in results if r.get('source').startswith('DB'))
 
-# --- 9. 백그라운드 파밍 엔진 ---
+# --- 8. 백그라운드 파밍 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -299,7 +294,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 10. UI 및 보안 로그아웃 ---
+# --- 9. UI 및 보안 로그아웃 ---
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
 if 'verified' not in st.session_state: st.session_state.verified, st.session_state.user_email = False, ""
 
