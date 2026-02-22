@@ -52,32 +52,43 @@ def check_user_limit(email):
     remaining = 5 - user['count']
     return (remaining > 0), remaining
 
-# --- 3. 수능 블루프린트 ---
+# --- 3. [핵심] 실제 수능 번호별 단원(Domain) 및 난이도 정밀 매핑 ---
 def get_exam_blueprint(choice_subject, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
         for i in range(1, 23):
-            if i <= 2: score = 2; diff = "쉬움"
-            elif i <= 8: score = 3; diff = "보통"
-            elif i in [15, 21, 22]: score = 4; diff = "킬러(고난도)"
-            else: score = 4; diff = "준킬러"
+            # 공통과목 수능 규격화
+            if i in [1, 2]: score = 2; diff = "쉬움"; domain = "지수와 로그 / 함수의 극한"
+            elif i in [3, 4, 5, 6, 7]: score = 3; diff = "보통"; domain = "삼각함수 / 미분 / 적분 기본"
+            elif i in [8, 9, 10, 11, 12]: score = 4; diff = "준킬러"; domain = "다항함수의 미적분 / 수열"
+            elif i in [13, 14]: score = 4; diff = "준킬러(복합)"; domain = "도함수의 활용 / 삼각함수 도형"
+            elif i == 15: score = 4; diff = "킬러(고난도)"; domain = "수열의 귀납적 정의 (추론)"
+            elif i in [16, 17, 18, 19]: score = 3; diff = "보통"; domain = "방정식 / 지수로그 연산"
+            elif i in [20, 21]: score = 4; diff = "준킬러(고난도)"; domain = "정적분으로 정의된 함수 / 그래프 추론"
+            elif i == 22: score = 4; diff = "초고난도(최종 킬러)"; domain = "다항함수의 추론과 미분"
+            else: score = 3; diff = "보통"; domain = "수학 I, II"
+            
             q_type = "객관식" if i <= 15 else "단답형"
-            blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": q_type})
+            blueprint.append({"num": i, "sub": "수학 I, II", "diff": diff, "score": score, "type": q_type, "domain": domain})
+            
         for i in range(23, 31):
-            if i <= 24: score = 2; diff = "쉬움"
-            elif i <= 27: score = 3; diff = "보통"
-            elif i == 30: score = 4; diff = "최종 킬러"
-            else: score = 4; diff = "준킬러"
+            # 선택과목 수능 규격화
+            if i in [23, 24]: score = 2; diff = "쉬움"; domain = f"{choice_subject} 기본 연산"
+            elif i in [25, 26, 27]: score = 3; diff = "보통"; domain = f"{choice_subject} 기본 응용"
+            elif i in [28, 29]: score = 4; diff = "준킬러(고난도)"; domain = f"{choice_subject} 심화 응용"
+            elif i == 30: score = 4; diff = "초고난도(최종 킬러)"; domain = f"{choice_subject} 최고난도 융합 추론"
+            else: score = 3; diff = "보통"; domain = choice_subject
+            
             q_type = "객관식" if i <= 28 else "단답형"
-            blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": q_type})
+            blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": q_type, "domain": domain})
     else:
         for i in range(1, total_num + 1):
             score = custom_score if custom_score else 3
-            diff = "쉬움" if score == 2 else "보통" if score == 3 else "어려움"
-            blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": "객관식"})
+            diff = "쉬움" if score == 2 else "보통" if score == 3 else "어려움(4점)"
+            blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": "객관식", "domain": f"{choice_subject} 전범위"})
     return blueprint
 
-# --- 4. HTML/CSS 템플릿 (가독성 최적화 유지) ---
+# --- 4. HTML/CSS 템플릿 (레이아웃 파괴 방지 적용) ---
 def get_html_template(subject, pages_html, solutions_html):
     return f"""
     <!DOCTYPE html>
@@ -105,6 +116,10 @@ def get_html_template(subject, pages_html, solutions_html):
             .q-num {{ position: absolute; left: 0; top: 4px; font-weight: 800; border: 2px solid #000; width: 25px; height: 25px; text-align: center; line-height: 23px; font-size: 11.5pt; background: #fff; }}
             .q-score {{ font-weight: 700; font-size: 10.5pt; margin-left: 5px; }}
             .options-container {{ margin-top: 15px; font-size: 10.5pt; }}
+            
+            /* 수능형 조건 박스 CSS */
+            .condition-box {{ border: 1.5px solid #000; padding: 10px 15px; margin: 10px 0; font-weight: bold; background: #fafafa; }}
+            
             .sol-section {{ border-top: 5px double #000; padding-top: 40px; }}
             .sol-item {{ margin-bottom: 35px; padding-bottom: 20px; border-bottom: 1px dashed #eee; line-height: 1.85; font-size: 10.5pt; }}
             .sol-step {{ margin-top: 8px; margin-bottom: 8px; padding-left: 10px; border-left: 3px solid #ccc; }}
@@ -122,25 +137,46 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. [문제은행 DB + 트래픽 제어] 비동기 엔진 ---
-# API 트래픽 제어: 한 번에 최대 10개씩만 요청하여 서버 과부하(Rate Limit) 방지
-sem = asyncio.Semaphore(10)
+# --- 5. [과부하 방어 & 수능 퀄리티 프롬프트] 비동기 엔진 ---
+# API 과부하 방지를 위해 동시 요청을 6개로 강력 제한 (대신 안정성 100%)
+sem = asyncio.Semaphore(6)
 
-async def generate_single_ai_q(q_info, retry=3):
+async def generate_single_ai_q(q_info, retry=4):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
+    
+    # 4점짜리 킬러 문항에 대한 강력한 수능형 프롬프트 주입
+    if q_info['score'] == 4:
+        diff_instruction = "이 문제는 수능 4점짜리 심화 추론 문제입니다. 단순 계산이 아닌, 반드시 (가), (나) 형태의 <div class='condition-box'>(가) 조건...<br>(나) 조건...</div> 박스를 포함하여 두 가지 이상의 수학적 개념을 융합해 추론해야만 풀 수 있도록 출제하세요."
+        sol_instruction = "4점 문항이므로 해설을 논리적 단계별(Step 1...)로 아주 자세하게 <div class='sol-step'> 태그를 활용해 설명하세요."
+    else:
+        diff_instruction = "이 문제는 수능 2~3점짜리 기본/응용 문제입니다. 복잡한 조건 없이 수식과 계산 위주로 명료하게 출제하세요."
+        sol_instruction = "쉬운 문항이므로 주저리주저리 긴 설명은 빼고 수식 전개 위주로 간결하게 정답 도출 과정을 보여주세요."
+
     type_instruction = "①~⑤ 기호로 5지선다 선지 필수 포함." if q_info['type'] == "객관식" else "선지 없이 정답이 3자리 이하 자연수인 단답형."
-    sol_instruction = "수식 전개 위주로 간결하게." if q_info['score'] <= 3 else "논리적 단계별(Step 1...)로 아주 자세하게. <div class='sol-step'> 태그 사용."
 
-    prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']}점 | 유형:{q_info['type']}
-[규칙] 1. 100% 한국어. 영어 절대 금지. 정답은 해설 끝에 명시. 2. 수식은 $ $ 3. {type_instruction} 4. {sol_instruction}
-오직 아래 JSON 형식만 출력 (마크다운 ``` 금지):
-{{"question": "(문제 내용과 선지)", "solution": "(해설 및 정답)"}}"""
+    prompt = f"""
+    출제 단원: {q_info['domain']} | 배점: {q_info['score']}점 | 유형: {q_info['type']}
+    
+    [출제 규칙]
+    1. 100% 한국어로만 작성. 영어 사용 금지. (정답은 해설 끝에 명시)
+    2. {diff_instruction}
+    3. {type_instruction}
+    4. {sol_instruction}
+    
+    반드시 아래 JSON 형식으로만 응답 (마크다운 ``` 금지):
+    {{"question": "(문제 내용과 선지)", "solution": "(해설 및 정답)"}}
+    """
 
-    async with sem:
-        for attempt in range(retry):
+    # 지수적 백오프 (Exponential Backoff)를 통한 과부하 방어
+    for attempt in range(retry):
+        await asyncio.sleep(random.uniform(0.1, 1.0)) # 동시 쏠림 방지 미세 딜레이
+        async with sem:
             try:
-                res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.7, response_mime_type="application/json"))
-                # JSON 파싱 안정성 강화
+                res = await model.generate_content_async(
+                    prompt, 
+                    generation_config=genai.types.GenerationConfig(temperature=0.7, response_mime_type="application/json")
+                )
+                
                 text = res.text.strip()
                 if text.startswith("```json"): text = text[7:]
                 if text.startswith("```"): text = text[3:]
@@ -148,17 +184,19 @@ async def generate_single_ai_q(q_info, retry=3):
                 
                 data = json.loads(text.strip())
                 return {
-                    "sub": q_info['sub'], "diff": q_info['diff'], "score": q_info['score'], "type": q_info['type'],
-                    "question": data.get("question", "오류"), "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
+                    "num": q_info['num'], "sub": q_info['sub'], "diff": q_info['diff'], 
+                    "score": q_info['score'], "type": q_info['type'], "domain": q_info['domain'],
+                    "question": data.get("question", "오류"), 
+                    "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
                 }
             except Exception as e:
                 if attempt == retry - 1:
-                    return None # 3번 실패 시 None 반환
-                await asyncio.sleep(1) # 실패 시 1초 대기 후 재시도
+                    return None
+                await asyncio.sleep(2 ** attempt) # 1초, 2초, 4초 대기 후 재시도 (과부하 완벽 회피)
 
 async def get_or_generate_question(q_info, used_ids):
-    # 1. 문제 은행 DB 검색 (초광속 0.01초 컷)
-    available_qs = bank_db.search((QBank.sub == q_info['sub']) & (QBank.diff == q_info['diff']) & (QBank.type == q_info['type']))
+    # DB 검색 시 '단원(domain)'과 '번호(num)'까지 일치하는지 엄격히 검사하여 수능 구조 유지
+    available_qs = bank_db.search((QBank.num == q_info['num']) & (QBank.domain == q_info['domain']))
     fresh_qs = [q for q in available_qs if q.doc_id not in used_ids]
     
     if fresh_qs:
@@ -169,12 +207,11 @@ async def get_or_generate_question(q_info, used_ids):
             "question": selected['question'], "solution": selected['solution'], "source": "DB"
         }
     
-    # 2. DB에 없으면 AI로 즉시 생성
     new_q = await generate_single_ai_q(q_info)
     if new_q:
         return {"num": q_info['num'], "score": q_info['score'], "question": new_q['question'], "solution": new_q['solution'], "source": "AI", "raw_data": new_q}
     else:
-        return {"num": q_info['num'], "score": q_info['score'], "question": "문제 생성 실패 (API 과부하)", "solution": "오류", "source": "ERROR"}
+        return {"num": q_info['num'], "score": q_info['score'], "question": "API 과부하로 생성이 지연되었습니다. 재시도 해주세요.", "solution": "오류", "source": "ERROR"}
 
 async def generate_exam_orchestrator(choice_subject, total_num, custom_score=None):
     blueprint = get_exam_blueprint(choice_subject, total_num, custom_score)
@@ -184,14 +221,12 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
     tasks = [get_or_generate_question(q, used_ids) for q in blueprint]
     results = await asyncio.gather(*tasks)
     
-    # 생성된 문제를 DB에 영구 저장 (다음 번 속도 향상을 위함)
     for res in results:
         if res.get("source") == "AI" and "raw_data" in res:
             bank_db.insert(res["raw_data"])
             
     results.sort(key=lambda x: x['num'])
     
-    # HTML 렌더링
     pages_html, sol_html = "", ""
     for i in range(0, len(results), 2):
         pair = results[i:i+2]
@@ -251,23 +286,11 @@ with st.sidebar:
         else:
             num = 30
         
-        generate_btn = st.button("🚀 지능형 초고속 발간", use_container_width=True)
+        generate_btn = st.button("🚀 지능형 안정적 발간", use_container_width=True)
         
-        # [혁신] 관리자 전용 DB 축적 패널
         if email_input == ADMIN_EMAIL:
             st.divider()
             st.caption(f"🗄️ 현재 DB 축적량: {len(bank_db)}문항")
-            if st.button("🤖 백그라운드 DB 10개 충전"):
-                with st.spinner("DB에 문항을 비축 중입니다..."):
-                    async def stock_db():
-                        q_info = {"num":0, "sub": choice_sub, "diff": "어려움", "score": 4, "type": "객관식"}
-                        tasks = [generate_single_ai_q(q_info) for _ in range(10)]
-                        res = await asyncio.gather(*tasks)
-                        for r in res:
-                            if r: bank_db.insert(r)
-                    asyncio.run(stock_db())
-                    st.success("충전 완료!")
-                    st.rerun()
 
 # 메인 화면 영역
 if st.session_state.verified:
@@ -277,11 +300,10 @@ if st.session_state.verified:
         st.info(f"📊 남은 횟수: {remain} | 과목: {choice_sub} | 난이도: {diff_info}")
         
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"DB 검색 및 AI 렌더링 동시 진행 중..."):
+            with st.spinner(f"DB 검색 및 AI 렌더링을 안전하게 동시 진행 중입니다..."):
                 p, s, elapsed, db_hits = asyncio.run(generate_exam_orchestrator(choice_sub, num, custom_score_val))
                 
-                # DB 효율 피드백 추가
-                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 신규 생성: {num - db_hits}개)")
+                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 신규 안전 생성: {num - db_hits}개)")
                 st.components.v1.html(get_html_template(choice_sub, p, s), height=1400, scrolling=True)
                 
                 if email_input != ADMIN_EMAIL:
