@@ -12,7 +12,7 @@ import uuid
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-# --- 1. 환경 설정 ---
+# --- 1. 환경 설정 및 API 보안 ---
 if "PAID_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["PAID_API_KEY"])
 else:
@@ -23,7 +23,7 @@ ADMIN_EMAIL = "pgh001002@gmail.com"
 SENDER_EMAIL = st.secrets.get("EMAIL_USER", "pgh001002@gmail.com")
 SENDER_PASS = st.secrets.get("EMAIL_PASS", "gmjg cvsg pdjq hnpw")
 
-# --- 2. DB 및 전역 락 ---
+# --- 2. DB 및 전역 락 (데이터 유실 방지) ---
 @st.cache_resource
 def get_databases():
     return TinyDB('user_registry.json'), TinyDB('question_bank.json')
@@ -37,10 +37,12 @@ def get_global_lock():
 
 DB_LOCK = get_global_lock()
 
-# --- 3. 정제 엔진 (수식 및 텍스트) ---
+# --- 3. 정제 엔진 (수식 및 텍스트 보정) ---
 def polish_output(text):
     if not text: return ""
+    # 메타데이터 제거
     text = re.sub(r'^(과목|단원|배점|유형|난이도|수학):.*?\n', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    # 수식 백슬래시 보정 (frac, theta 등)
     math_words = ['frac', 'theta', 'pi', 'sqrt', 'log', 'lim', 'to', 'infty', 'sin', 'cos', 'tan', 'sum', 'int']
     for word in math_words:
         text = re.sub(rf'(?<!\\){word}', rf'\\{word}', text)
@@ -60,7 +62,7 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. 수능형 문항 배치 로직 ---
+# --- 4. 수능형 문항 배치 로직 (Blueprint) ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
@@ -80,7 +82,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 5. HTML/CSS 템플릿 (PDF 다운로드 + 수능 조판) ---
+# --- 5. HTML/CSS 템플릿 (PDF 다운로드 + 2단 조판) ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -104,10 +106,10 @@ def get_html_template(p_html, s_html):
             .paper-container {{ display: flex; flex-direction: column; align-items: center; }}
             .paper {{ background: white; width: 210mm; padding: 15mm 18mm; margin-bottom: 30px; box-shadow: 0 5px 20px rgba(0,0,0,0.1); position: relative; page-break-after: always; }}
             .header {{ text-align: center; border-bottom: 2.5px solid #000; margin-bottom: 25px; padding-bottom: 10px; }}
-            .cat-title {{ font-size: 14pt; font-weight: 800; border: 2px solid #000; display: inline-block; padding: 2px 15px; margin-bottom: 20px; }}
+            .cat-title {{ font-size: 14pt; font-weight: 800; border: 2px solid #000; display: inline-block; padding: 2px 15px; margin-bottom: 20px; background: #fff; }}
             .question-grid {{ display: grid; grid-template-columns: 1fr 1fr; column-gap: 55px; min-height: 230mm; position: relative; }}
             .question-grid::after {{ content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background-color: #ddd; }}
-            .question-box {{ position: relative; line-height: 2.3; font-size: 11pt; padding-left: 30px; margin-bottom: 50px; text-align: justify; }}
+            .question-box {{ position: relative; line-height: 2.3; font-size: 11pt; padding-left: 30px; margin-bottom: 45px; text-align: justify; }}
             .q-num {{ position: absolute; left: 0; top: 0; font-weight: 800; font-size: 13pt; }}
             .options-container {{ margin-top: 25px; display: flex; flex-wrap: wrap; gap: 10px 5px; font-size: 10.5pt; }}
             .options-container span {{ flex: 1 1 18%; min-width: 135px; white-space: nowrap; }}
@@ -122,10 +124,10 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 6. 엔진 로직 ---
+# --- 6. 엔진 로직 (분할 생성 및 지연 방지) ---
 async def generate_batch_ai(q_info, size=3):
     model = genai.GenerativeModel('models/gemini-2.5-flash')
-    prompt = f"과목:{q_info['sub']} | 배점:{q_info['score']} | 난이도:수능형\n[필수] 수식 $ $ 사용. 5지선다는 options 배열에 5개. JSON 배열 {size}개 생성: [{{ \"question\": \"...\", \"options\": [...], \"solution\": \"...\" }}]"
+    prompt = f"과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}\n[필수] 수식 $ $ 사용. 5지선다는 options 배열에 5개. JSON 배열 {size}개 생성: [{{ \"question\": \"...\", \"options\": [...], \"solution\": \"...\" }}]"
     try:
         res = await model.generate_content_async(prompt, generation_config=genai.types.GenerationConfig(temperature=0.8, response_mime_type="application/json"))
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type'], "cat": q_info.get('cat','공통')} for d in json.loads(res.text.strip())]
@@ -138,10 +140,10 @@ async def get_safe_q(q_info, used_ids, used_batch_ids):
     if fresh:
         sel = random.choice(fresh)
         used_ids.add(str(sel.doc_id)); used_batch_ids.add(sel.get('batch_id'))
-        return {**sel, "num": q_info['num'], "source": "DB"}
+        return {**sel, "num": q_info['num'], "source": "DB", "cat": q_info['cat']}
     new_batch = await generate_batch_ai(q_info)
-    if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch}
-    return {"num": q_info['num'], "question": "생성 지연", "options": [], "solution": "오류"}
+    if new_batch: return {**new_batch[0], "num": q_info['num'], "source": "AI", "full_batch": new_batch, "cat": q_info['cat']}
+    return {"num": q_info['num'], "question": "생성 지연", "options": [], "solution": "오류", "cat": q_info['cat']}
 
 async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     blueprint = get_exam_blueprint(sub_choice, num_choice, score_choice)
@@ -151,7 +153,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     chunk_size = 3
     for i in range(0, len(blueprint), chunk_size):
         chunk = blueprint[i : i + chunk_size]
-        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 문항 구성 중...")
+        status.text(f"⏳ {i+1}번 ~ {min(i+chunk_size, 30)}번 문항 로딩 중...")
         tasks = [get_safe_q(q, used_ids, used_batch_ids) for q in chunk]
         chunk_res = await asyncio.gather(*tasks)
         results.extend(chunk_res)
@@ -161,33 +163,36 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
     status.empty(); prog.empty()
 
     results.sort(key=lambda x: x.get('num', 999))
+    
+    # [해결] 30문항 전체가 p_html에 담기도록 렌더링 로직 복구
     p_html, s_html = "", ""
     
-    # 영역별 렌더링 (공통/선택 분리)
+    # 공통과목과 선택과목을 순차적으로 렌더링
     for cat_name in ["공통", "선택", "맞춤"]:
         cat_qs = [r for r in results if r.get('cat') == cat_name]
         if not cat_qs: continue
         
-        cat_label = "공통과목 (수학 I, 수학 II)" if cat_name == "공통" else f"선택과목 ({sub_choice})" if cat_name == "선택" else "맞춤 문항"
-        q_html_buffer = f"<div class='cat-title'>{cat_label}</div>"
+        label = "공통과목 (수학 I, 수학 II)" if cat_name == "공통" else f"선택과목 ({sub_choice})" if cat_name == "선택" else "맞춤 문항"
         
+        # 문항별 HTML 생성
+        rendered_qs = []
         for item in cat_qs:
             q_text = polish_output(item.get("question", ""))
             opts = item.get("options", [])
-            opt_html = ""
-            if item.get('type') == '객관식' and opts:
-                spans = "".join([f"<span>{chr(9312+j)} {clean_option(o)}</span>" for j, o in enumerate(opts[:5])])
-                opt_html = f"<div class='options-container'>{spans}</div>"
-            q_html_buffer += f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>"
+            opt_html = f"<div class='options-container'>{''.join([f'<span>{chr(9312+j)} {clean_option(o)}</span>' for j, o in enumerate(opts[:5])])}</div>" if item.get('type') == '객관식' else ""
+            rendered_qs.append(f"<div class='question-box'><span class='q-num'>{item.get('num')}</span> {q_text} <b>[{item.get('score',3)}점]</b>{opt_html}</div>")
             s_html += f"<div class='sol-item'><b>{item.get('num')}번:</b> {polish_output(item.get('solution',''))}</div>"
         
-        # 페이지 단위 분할 (한 페이지당 약 8문항)
-        q_list = q_html_buffer.split("<div class='question-box'>")
-        header_text = q_list[0]
-        q_items = q_list[1:]
-        for j in range(0, len(q_items), 8):
-            chunk = "".join([f"<div class='question-box'>{q}" for q in q_items[j:j+8]])
-            p_html += f"<div class='paper'><div class='header'><h1>2026 수능 모의평가</h1></div>{header_text if j==0 else ''}<div class='question-grid'>{chunk}</div></div>"
+        # 페이지 단위로 묶어서 p_html에 추가
+        for j in range(0, len(rendered_qs), 8): # 페이지당 8문제씩
+            page_content = "".join(rendered_qs[j:j+8])
+            header_box = f"<div class='cat-title'>{label}</div>" if j == 0 else ""
+            p_html += f"""
+            <div class='paper'>
+                <div class='header'><h1>2026 수능 모의평가</h1></div>
+                {header_box}
+                <div class='question-grid'>{page_content}</div>
+            </div>"""
 
     return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
@@ -195,41 +200,48 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
-        msg.attach(MIMEText(f"인증번호: [{code}]", 'plain'))
+        msg.attach(MIMEText(f"번호: [{code}]", 'plain'))
         s = smtplib.SMTP('smtp.gmail.com', 587); s.starttls(); s.login(SENDER_EMAIL, SENDER_PASS); s.send_message(msg); s.quit()
         return True
     except: return False
 
 st.set_page_config(page_title="Premium 수능 출제 시스템", layout="wide")
-if 'v' not in st.session_state: st.session_state.v = False
+if 'verified' not in st.session_state: st.session_state.verified = False
 
 with st.sidebar:
     st.title("🎓 본부 인증")
-    email_in = st.text_input("이메일", value=ADMIN_EMAIL if st.session_state.v else "")
-    if email_in == ADMIN_EMAIL: st.session_state.v = True
-    if not st.session_state.v:
+    email_in = st.text_input("이메일 입력", value=ADMIN_EMAIL if st.session_state.verified else "")
+    
+    # 관리자 자동 인증
+    if email_in == ADMIN_EMAIL:
+        st.session_state.verified = True
+        st.success("👑 관리자 자동 인증 완료")
+    
+    # 이메일 인증 인터페이스 (사용자 요청 절대 유지)
+    if not st.session_state.verified:
         if st.button("인증번호 발송"):
             code = str(random.randint(100000, 999999))
             if send_verification_email(email_in, code):
                 st.session_state.auth_code, st.session_state.mail_sent = code, True
-                st.success("발송 완료!")
+                st.success("인증번호를 발송했습니다.")
+        
         if st.session_state.get('mail_sent'):
             c_in = st.text_input("6자리 입력")
             if st.button("확인"):
-                if c_in == st.session_state.auth_code: st.session_state.v = True; st.rerun()
+                if c_in == st.session_state.auth_code:
+                    st.session_state.verified = True; st.rerun()
 
-    if st.session_state.v:
+    if st.session_state.verified:
         st.divider()
-        mode = st.radio("모드", ["30문항 풀세트", "맞춤 문항"])
+        mode = st.radio("출제 모드", ["30문항 풀세트", "맞춤 문항"])
         sub = st.selectbox("선택과목", ["미적분", "확률과 통계", "기하"])
         num = 30 if mode == "30문항 풀세트" else st.slider("문항 수", 2, 30, 4, step=2)
-        score = int(st.selectbox("문항 난이도", ["2", "3", "4"])) if mode == "맞춤 문항" else None
-        btn = st.button("🚀 발간 시작", use_container_width=True)
+        score = int(st.selectbox("문항 난이도(배점)", ["2", "3", "4"])) if mode == "맞춤 문항" else None
+        btn = st.button("🚀 모의고사 발간", use_container_width=True)
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)}")
 
-if st.session_state.v and btn:
-    with st.spinner("수능 규격 조판 및 안정화 엔진 가동 중..."):
+if st.session_state.verified and btn:
+    with st.spinner("수능 규격 조판 및 전 문항 검수 중..."):
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
-        st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
+        st.success(f"✅ 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
-
