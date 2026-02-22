@@ -86,7 +86,7 @@ def get_exam_blueprint(choice_subject, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_subject, "diff": diff, "score": score, "type": "객관식", "domain": f"{choice_subject} 전범위"})
     return blueprint
 
-# --- 4. HTML/CSS 템플릿 (선지 분리 디자인 강화) ---
+# --- 4. HTML/CSS 템플릿 ---
 def get_html_template(subject, pages_html, solutions_html):
     return f"""
     <!DOCTYPE html>
@@ -113,17 +113,8 @@ def get_html_template(subject, pages_html, solutions_html):
             .question-box {{ position: relative; line-height: 2.0; font-size: 11pt; padding-left: 36px; margin-bottom: 45px; text-align: justify; word-break: break-all; }}
             .q-num {{ position: absolute; left: 0; top: 4px; font-weight: 800; border: 2px solid #000; width: 25px; height: 25px; text-align: center; line-height: 23px; font-size: 11.5pt; background: #fff; }}
             .q-score {{ font-weight: 700; font-size: 10.5pt; margin-left: 5px; }}
-            
-            /* 객관식 선지 완벽 정렬 CSS */
-            .options-container {{ 
-                margin-top: 25px; /* 문제 텍스트와 분리 */
-                display: flex; 
-                justify-content: space-between; /* 5개 선지 좌우 균등 분할 */
-                font-size: 10.5pt; 
-                padding: 0 5px;
-            }}
+            .options-container {{ margin-top: 25px; display: flex; justify-content: space-between; font-size: 10.5pt; padding: 0 5px; }}
             .options-container span {{ display: inline-block; }}
-            
             .condition-box {{ border: 1.5px solid #000; padding: 10px 15px; margin: 10px 0; font-weight: bold; background: #fafafa; }}
             .sol-section {{ border-top: 5px double #000; padding-top: 40px; }}
             .sol-item {{ margin-bottom: 35px; padding-bottom: 20px; border-bottom: 1px dashed #eee; line-height: 1.85; font-size: 10.5pt; }}
@@ -142,32 +133,44 @@ def get_html_template(subject, pages_html, solutions_html):
     </html>
     """
 
-# --- 5. [AI 로직 & 무한 자동 축적 시스템] ---
+# --- 5. [혁신] 창의성 스펙트럼 다중 문항 생성 로직 ---
 sem = asyncio.Semaphore(6)
 
-async def generate_single_ai_q(q_info, retry=4):
+async def generate_batch_ai_qs(q_info, batch_size=10, retry=3):
+    """한 번의 호출로 숫자 변형부터 창의적 변형까지 스펙트럼이 적용된 여러 문항을 반환합니다."""
     model = genai.GenerativeModel('models/gemini-2.5-flash')
     
     if q_info['score'] == 4:
-        diff_instruction = "수능 4점 심화 추론 문제. (가), (나) 조건 박스 <div class='condition-box'>(가) ...<br>(나) ...</div> 필수 포함."
-        sol_instruction = "논리적 단계별(Step 1...)로 자세하게 <div class='sol-step'> 태그 사용해 해설."
+        diff_instruction = "수능 4점 심화. (가), (나) 조건 박스 <div class='condition-box'>(가) ...<br>(나) ...</div> 필수 포함."
+        sol_instruction = "단계별(Step 1...)로 <div class='sol-step'> 태그 사용해 해설."
     else:
         diff_instruction = "수능 2~3점 기본 응용. 계산 위주 명료하게 출제."
-        sol_instruction = "수식 전개 위주로 가장 간결하게 작성."
+        sol_instruction = "수식 위주로 간결하게 작성."
 
-    type_instruction = "5지선다 객관식이므로 'options' 배열에 5개의 선지 내용을 문자열로 넣을 것." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 [] 로 둘 것."
+    type_instruction = "5지선다이므로 'options' 배열에 5개의 선지 포함." if q_info['type'] == "객관식" else "단답형이므로 'options'는 빈 배열 []."
 
-    # JSON 구조 강제 (선지를 배열로 분리)
+    # 스펙트럼 프롬프트 주입
     prompt = f"""
     단원: {q_info['domain']} | 배점: {q_info['score']}점 | 유형: {q_info['type']}
-    [규칙] 1. 100% 한국어. 정답은 해설 끝에. 2. {diff_instruction} 3. {sol_instruction} 4. {type_instruction} 5. 수식은 $ $ 
     
-    오직 아래 JSON 형식만 반환 (절대 마크다운 쓰지 말 것):
-    {{
-        "question": "(문제 텍스트만)",
-        "options": ["답1", "답2", "답3", "답4", "답5"],
-        "solution": "(해설 및 정답)"
-    }}
+    [기본 규칙] 
+    1. 100% 한국어. 2. {diff_instruction} 3. {sol_instruction} 4. {type_instruction} 5. 수식은 $ $ 
+    
+    [💡 창의적 스펙트럼 특별 지시]
+    단순히 숫자만 바꾸지 마세요. {q_info['domain']} 개념을 유지하되, 다음 비율로 스펙트럼을 넓혀서 {batch_size}개의 독립적인 문항을 만드세요:
+    - 3개: [기본 변형] 원본과 유사하게 숫자, 함수식, 부호 정도만 가볍게 변경
+    - 4개: [응용 변형] 구하는 대상을 역으로 묻거나, 질문 방식을 비틀어서 제시
+    - 3개: [창의적 변형] 실생활 활용, 완전히 낯선 도형 조건, 또는 새로운 상황을 가정한 창의적이고 참신한 형태
+    
+    오직 아래 JSON 배열(Array) 형식만 반환:
+    [
+        {{
+            "question": "(문제 1 텍스트)",
+            "options": ["답1", "답2", "답3", "답4", "답5"],
+            "solution": "(해설 및 정답 1)"
+        }},
+        ... ({batch_size}개 반복)
+    ]
     """
 
     for attempt in range(retry):
@@ -176,23 +179,26 @@ async def generate_single_ai_q(q_info, retry=4):
             try:
                 res = await model.generate_content_async(
                     prompt, 
-                    generation_config=genai.types.GenerationConfig(temperature=0.7, response_mime_type="application/json")
+                    generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json") # 다양성을 위해 온도 0.85로 상향
                 )
                 text = res.text.strip()
                 if text.startswith("```json"): text = text[7:]
                 if text.startswith("```"): text = text[3:]
                 if text.endswith("```"): text = text[:-3]
                 
-                data = json.loads(text.strip())
-                return {
-                    "num": q_info.get('num', 0), "sub": q_info['sub'], "diff": q_info['diff'], 
-                    "score": q_info['score'], "type": q_info['type'], "domain": q_info['domain'],
-                    "question": data.get("question", "오류"), 
-                    "options": data.get("options", []),
-                    "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
-                }
+                data_list = json.loads(text.strip())
+                parsed_questions = []
+                for data in data_list:
+                    parsed_questions.append({
+                        "sub": q_info['sub'], "diff": q_info['diff'], 
+                        "score": q_info['score'], "type": q_info['type'], "domain": q_info['domain'],
+                        "question": data.get("question", "오류"), 
+                        "options": data.get("options", []),
+                        "solution": data.get("solution", "오류").replace("The final answer is", "정답은")
+                    })
+                return parsed_questions
             except Exception as e:
-                if attempt == retry - 1: return None
+                if attempt == retry - 1: return []
                 await asyncio.sleep(2 ** attempt)
 
 async def get_or_generate_question(q_info, used_ids):
@@ -208,12 +214,14 @@ async def get_or_generate_question(q_info, used_ids):
             "solution": selected['solution'], "source": "DB"
         }
     
-    new_q = await generate_single_ai_q(q_info)
-    if new_q:
-        new_q['num'] = q_info['num']
-        return {**new_q, "source": "AI", "raw_data": new_q}
+    # DB에 없으면 스펙트럼 적용된 10문항을 한 번에 뽑아옴
+    new_qs = await generate_batch_ai_qs(q_info, batch_size=10)
+    if new_qs:
+        first_q = new_qs[0]
+        first_q['num'] = q_info['num']
+        return {**first_q, "source": "AI", "raw_batch": new_qs}
     else:
-        return {"num": q_info['num'], "score": q_info['score'], "question": "API 과부하 오류", "options": [], "solution": "오류", "source": "ERROR"}
+        return {"num": q_info['num'], "score": q_info['score'], "question": "API 오류", "options": [], "solution": "오류", "source": "ERROR"}
 
 async def generate_exam_orchestrator(choice_subject, total_num, custom_score=None):
     blueprint = get_exam_blueprint(choice_subject, total_num, custom_score)
@@ -224,8 +232,9 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
     results = await asyncio.gather(*tasks)
     
     for res in results:
-        if res.get("source") == "AI" and "raw_data" in res:
-            bank_db.insert(res["raw_data"])
+        if res.get("source") == "AI" and "raw_batch" in res:
+            for raw_q in res["raw_batch"]:
+                bank_db.insert(raw_q)
             
     results.sort(key=lambda x: x['num'])
     
@@ -234,7 +243,6 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
         pair = results[i:i+2]
         q_content = ""
         for item in pair:
-            # 파이썬 로직에서 객관식 선지 HTML 조립 (띄어쓰기 완벽 보장)
             opts = item.get('options', [])
             if opts and len(opts) >= 5:
                 opt_html = f"<div class='options-container'><span>① {opts[0]}</span><span>② {opts[1]}</span><span>③ {opts[2]}</span><span>④ {opts[3]}</span><span>⑤ {opts[4]}</span></div>"
@@ -249,7 +257,7 @@ async def generate_exam_orchestrator(choice_subject, total_num, custom_score=Non
     db_hits = sum(1 for r in results if r.get('source') == 'DB')
     return pages_html, sol_html, time.time() - start_time, db_hits
 
-# --- 백그라운드 DB 10,000제 무한 생성 스레드 (Auto-Farming) ---
+# --- 백그라운드 스펙트럼 DB 무한 생성 스레드 ---
 def run_auto_farmer():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -264,15 +272,17 @@ async def auto_farm_loop():
                 diff = "쉬움" if score == 2 else "보통" if score == 3 else "어려움"
                 q_type = random.choice(["객관식", "단답형"]) if score > 2 else "객관식"
                 
-                q_info = {"num": 0, "sub": sub, "diff": diff, "score": score, "type": q_type, "domain": f"{sub} 랜덤"}
-                res = await generate_single_ai_q(q_info, retry=1)
-                if res:
-                    bank_db.insert(res)
-            await asyncio.sleep(12) # 12초마다 1문제씩 서버 몰래 조용히 적립 (과부하 X)
+                q_info = {"sub": sub, "diff": diff, "score": score, "type": q_type, "domain": f"{sub} 핵심 랜덤"}
+                # 한 번에 10개씩 스펙트럼 생성
+                batch_qs = await generate_batch_ai_qs(q_info, batch_size=10, retry=1)
+                
+                for q in batch_qs:
+                    bank_db.insert(q)
+                    
+            await asyncio.sleep(20) # 20초마다 10문제씩 쾌속 적립
         except Exception:
-            await asyncio.sleep(12)
+            await asyncio.sleep(20)
 
-# 앱 실행 시 딱 한 번만 백그라운드 스레드 가동
 if 'auto_farmer_started' not in st.session_state:
     t = threading.Thread(target=run_auto_farmer, daemon=True)
     t.start()
@@ -326,9 +336,22 @@ with st.sidebar:
         
         generate_btn = st.button("🚀 지능형 자동 발간", use_container_width=True)
         
-        st.divider()
-        st.caption(f"🗄️ 백그라운드 DB 축적량: {len(bank_db)} / 10000 개")
-        st.caption("(앱을 켜두시면 12초마다 자동으로 1문제씩 알아서 채워집니다.)")
+        if email_input == ADMIN_EMAIL:
+            st.divider()
+            st.caption(f"🗄️ 백그라운드 DB: {len(bank_db)} / 10000 개")
+            if st.button("🤖 창의적 수동 충전 (100문제)"):
+                with st.spinner("DB에 스펙트럼 100문제를 순식간에 비축 중입니다..."):
+                    async def stock_db():
+                        q_info = {"sub": choice_sub, "diff": "어려움", "score": 4, "type": "객관식", "domain": f"{choice_sub} 핵심"}
+                        # 10번 호출 x 배치 10 = 100문제 생성
+                        tasks = [generate_batch_ai_qs(q_info, batch_size=10) for _ in range(10)]
+                        res = await asyncio.gather(*tasks)
+                        for batch in res:
+                            for q in batch:
+                                bank_db.insert(q)
+                    asyncio.run(stock_db())
+                    st.success("100문제 충전 완료!")
+                    st.rerun()
 
 # 메인 화면 영역
 if st.session_state.verified:
@@ -338,10 +361,10 @@ if st.session_state.verified:
         st.info(f"📊 남은 횟수: {remain} | 과목: {choice_sub} | 난이도: {diff_info}")
         
         if 'generate_btn' in locals() and generate_btn:
-            with st.spinner(f"DB 검색 및 AI 렌더링을 안전하게 동시 진행 중입니다..."):
+            with st.spinner(f"DB 검색 및 AI 스펙트럼 렌더링 동시 진행 중..."):
                 p, s, elapsed, db_hits = asyncio.run(generate_exam_orchestrator(choice_sub, num, custom_score_val))
                 
-                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 신규 안전 생성: {num - db_hits}개)")
+                st.success(f"✅ 발간 완료! (소요 시간: {elapsed:.1f}초 | DB 사용: {db_hits}개, 스펙트럼 자동 생성: {num - db_hits}개)")
                 st.components.v1.html(get_html_template(choice_sub, p, s), height=1400, scrolling=True)
                 
                 if email_input != ADMIN_EMAIL:
