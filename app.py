@@ -19,7 +19,6 @@ else:
     st.error("PAID_API_KEY 설정이 필요합니다!")
     st.stop()
 
-# 구글 자체 검열로 인한 생성 차단 방지
 SAFETY_SETTINGS = [
     {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
     {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
@@ -73,16 +72,18 @@ def safe_save_to_bank(batch):
                 except: continue
     threading.Thread(target=_bg_save, daemon=True).start()
 
-# --- 4. 수능 표준 배치 설계 (객관/주관식 엄격 분리) ---
+# --- 4. 수능 표준 배치 설계 (비율 완벽 고정) ---
 def get_exam_blueprint(choice_sub, total_num, custom_score=None):
     blueprint = []
     if total_num == 30:
+        # 공통과목: 1~15 (객관식), 16~22 (주관식)
         for i in range(1, 16): 
             score = 2 if i <= 3 else 4 if i in [9,10,11,12,13,14,15] else 3
             blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "객관식", "cat": "공통"})
         for i in range(16, 23):
             score = 4 if i in [21, 22] else 3
             blueprint.append({"num": i, "sub": "수학 I, II", "score": score, "type": "주관식", "cat": "공통"})
+        # 선택과목: 23~28 (객관식 6문제), 29~30 (주관식 2문제)
         for i in range(23, 29): 
             score = 2 if i == 23 else 4 if i == 28 else 3
             blueprint.append({"num": i, "sub": choice_sub, "score": score, "type": "객관식", "cat": "선택"})
@@ -93,7 +94,7 @@ def get_exam_blueprint(choice_sub, total_num, custom_score=None):
             blueprint.append({"num": i, "sub": choice_sub, "score": custom_score or 3, "type": "객관식", "cat": "맞춤"})
     return blueprint
 
-# --- 5. HTML/CSS 템플릿 (레이아웃 붕괴 방지) ---
+# --- 5. HTML/CSS 템플릿 ---
 def get_html_template(p_html, s_html):
     return f"""
     <!DOCTYPE html>
@@ -137,29 +138,37 @@ def get_html_template(p_html, s_html):
     </html>
     """
 
-# --- 6. AI 생성 엔진 (JSON 파싱 및 에러 방어) ---
-async def generate_batch_ai(q_info, size=2): 
-    model = genai.GenerativeModel('models/gemini-2.5-flash')
-    
+# --- 6. [핵심] 공통 프롬프트 생성기 (오류 1, 2, 3 원천 봉쇄) ---
+def build_strict_prompt(q_info, size):
     diff_guide = ""
     if q_info['score'] == 4:
-        if q_info.get('num', 0) in [15, 22, 30]:
-            diff_guide = "[초고난도 변별력 문항] (가), (나) 조건을 제시하고 복합 개념 융합 출제."
-        else:
-            diff_guide = "[고난도 4점] 복합 사고력 요구."
+        diff_guide = "[초고난도 변별력] (가), (나) 조건을 포함한 복합 개념 융합 출제." if q_info.get('num', 0) in [15, 22, 30] else "[고난도 4점] 복합 사고력 요구."
     elif q_info['score'] == 3:
         diff_guide = "[응용 3점] 수능 3점 수준."
     else:
         diff_guide = "[기초 2점] 수능 2점 수준 기초 연산."
 
-    opt_rule = "반드시 options 배열에 5개의 선지를 채울 것." if q_info['type'] == '객관식' else "주관식(단답형)이므로 options 배열은 비워둘 것."
+    # [오류 3 해결] 주관식 정답 조건(3자리 이하 자연수) 강제
+    if q_info['type'] == '객관식':
+        opt_rule = "객관식이므로 options 배열에 5개의 선지를 반드시 작성할 것."
+    else:
+        opt_rule = "주관식(단답형)이므로 options 배열은 비워두고([]), 정답은 반드시 '3자리 이하의 자연수'가 되도록 출제할 것."
 
+    # [오류 1, 2 해결] 한국어 강제 및 출제 범위 엄격 제한
     prompt = f"""과목:{q_info['sub']} | 배점:{q_info['score']} | 유형:{q_info['type']}
-[지시사항] 
-1. {diff_guide}
-2. {opt_rule}
-3. 수식 $ $ 필수. 과목명 등 부가 텍스트 금지.
+[최우선 필수 지시사항] 
+1. 언어: 모든 문제, 선지, 해설은 반드시 **한국어**로만 작성할 것. (영어 사용 금지)
+2. 출제 범위: 반드시 '{q_info['sub']}' 교육과정 내에서만 출제할 것. (공통과목인 '수학 I, II' 출제 시 미적분/기하 개념 절대 포함 금지)
+3. 난이도: {diff_guide}
+4. 유형: {opt_rule}
+5. 형식: 수식 $ $ 필수. 지문에 과목명, 배점, 번호 등 부가 텍스트 절대 금지.
 JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}]"""
+    return prompt
+
+# --- 7. AI 생성 엔진 ---
+async def generate_batch_ai(q_info, size=2): 
+    model = genai.GenerativeModel('models/gemini-2.5-flash')
+    prompt = build_strict_prompt(q_info, size)
     
     try:
         res = await model.generate_content_async(
@@ -167,18 +176,12 @@ JSON 배열 {size}개 생성: [{{ "question": "...", "options": [...], "solution
             safety_settings=SAFETY_SETTINGS, 
             generation_config=genai.types.GenerationConfig(temperature=0.85, response_mime_type="application/json")
         )
-        
         raw_text = res.text.strip()
-        # 마크다운 찌꺼기 완벽 방어
         match = re.search(r'\[.*\]', raw_text, re.DOTALL)
-        if match:
-            data = json.loads(match.group(0))
-        else:
-            data = json.loads(raw_text)
+        data = json.loads(match.group(0)) if match else json.loads(raw_text)
             
         return [{**d, "batch_id": str(uuid.uuid4()), "sub": q_info['sub'], "score": q_info['score'], "type": q_info['type']} for d in data]
     except Exception as e:
-        print(f"[AI 생성 에러] {e}") 
         return []
 
 async def get_safe_q(q_info, used_ids, used_batch_ids):
@@ -273,7 +276,7 @@ async def run_orchestrator(sub_choice, num_choice, score_choice=None):
 
     return p_html, s_html, sum(1 for r in results if r.get('source') == 'DB')
 
-# --- 7. 백그라운드 DB 동기(Sync) 축적 엔진 ---
+# --- 8. [프롬프트 일원화] 백그라운드 자동 축적 엔진 ---
 def run_auto_farmer():
     sync_model = genai.GenerativeModel('models/gemini-2.5-flash')
     while True:
@@ -285,10 +288,9 @@ def run_auto_farmer():
                 score = random.choice([2, 3, 4])
                 q_type = random.choice(["객관식", "주관식"])
                 
-                diff_guide = "[초고난도] 복합 개념 출제" if score == 4 else "[응용 3점]" if score == 3 else "[기초 2점]"
-                opt_rule = "options 배열에 5개 필수." if q_type == '객관식' else "options 배열은 비워둘 것."
-                
-                prompt = f"""과목:{sub} | 배점:{score} | 유형:{q_type}\n[지시사항] 1.{diff_guide} 2.{opt_rule} 3.수식 $ $ 필수.\nJSON 배열 2개 생성: [{{ "question": "...", "options": [...], "solution": "..." }}]"""
+                # 메인 엔진과 100% 동일한 강력한 프롬프트 적용
+                q_info = {"sub": sub, "score": score, "type": q_type}
+                prompt = build_strict_prompt(q_info, size=2)
                 
                 res = sync_model.generate_content(
                     prompt, 
@@ -312,7 +314,7 @@ if 'farmer_running' not in st.session_state:
     threading.Thread(target=run_auto_farmer, daemon=True).start()
     st.session_state.farmer_running = True
 
-# --- 8. UI 및 인증 ---
+# --- 9. UI 및 인증 ---
 def send_verification_email(receiver, code):
     try:
         msg = MIMEMultipart(); msg['From'] = SENDER_EMAIL; msg['To'] = receiver; msg['Subject'] = "[인증번호]"
@@ -334,7 +336,7 @@ with st.sidebar:
         if st.button("🚨 DB 완전 초기화 (과거 오류 문항 삭제)"):
             with DB_LOCK:
                 bank_db.truncate()
-            st.success("DB가 완벽히 초기화되었습니다! 이제 정상적으로 문제가 채워집니다.")
+            st.success("DB가 완벽히 초기화되었습니다! 이제 깨끗한 한글/범위 문제만 저장됩니다.")
             st.rerun()
 
     if not st.session_state.verified:
@@ -358,7 +360,8 @@ with st.sidebar:
         with DB_LOCK: st.caption(f"🗄️ DB 축적량: {len(bank_db)} / 10000")
 
 if st.session_state.verified and btn:
-    with st.spinner("AI 엔진 가동 중... (수능 표준 규격 조판 진행 중)"):
+    with st.spinner("AI 엔진 가동 중... (한국어/출제범위/형식 철저 검증 중)"):
         p, s, hits = asyncio.run(run_orchestrator(sub, num, score))
         st.success(f"✅ 발간 완료! (DB 활용: {hits}개)")
         st.components.v1.html(get_html_template(p, s), height=1200, scrolling=True)
+
